@@ -1,8 +1,9 @@
 # M2 design: 6-max abstraction (cards + bets) and memory budget
 
-Status: **design only.** Nothing here trains or allocates strategy tables. The betting-tree
-counter and memory estimator are implemented and tested (`engine/nlhe`); card abstraction,
-equity tables and parallel MCCFR are specified below but not built.
+Status: **design accepted, config A (`m2_11g`) chosen.** Nothing here trains or allocates
+strategy tables. Implemented and tested in `engine/nlhe`: betting-tree counter, memory
+estimator, 7-card evaluator, river equity. Card abstraction (clustering), the hand-isomorphism
+indexer and parallel MCCFR are specified below but not built.
 
 Reproduce every number in the estimator sections:
 
@@ -207,6 +208,29 @@ config A's actions at 286 buckets, or config B's actions at only 110 buckets. Pl
 < 512 GB of RAM. Both configs here are deliberately far smaller. The design bet is
 that M4 search compensates for a coarse blueprint, which is the paper's own argument.
 
+### Regret storage: int32 with a floor (pending the PDF check)
+
+- **Regrets:** `i32`, as Pluribus stored them (unverified).
+  - Each update is rounded to whole chips.
+  - Positive side: saturating add, plus a saturation counter that must stay at 0.
+  - Headroom: max |increment| per visit ≤ total pot ≤ 60,000 chips, so ≥ 35,000
+    max-size increments before overflow; real increments are far smaller.
+- **Floor:** clamp regrets at **−310,000,000**; prune threshold **C = −300,000,000**
+  (paper values, unverified).
+  - Our 6-max game uses the paper's own chip units (bb = 100, stacks 10,000), so no scaling
+    is needed.
+  - The toy games scale by max |utility| / 10,000, as in `docs/m1_pruning.md`: Kuhn
+    floor −62,000, Leduc −403,000.
+  - Both sit far inside the i32 range (−2.147 × 10⁹).
+- **Average strategy:** `u32` counts on the preflop only, multiplied by the linear-discount
+  factor with rounding during the discount phase.
+- **Interaction with pruning:** the floor only raises negative regrets, so the
+  "max regret ≥ 0" argument in `docs/m1_pruning.md` still holds. Integer rounding can only
+  push the max a few chips below 0, nowhere near C. The all-pruned counter stays as a guard.
+- **Estimator impact: none.** It already assumes 4-byte regrets and 4-byte preflop
+  average-strategy counts. The floor changes values, not sizes, so no byte counts change and
+  the shipped config tests still pin 9.86 / 25.40 GiB.
+
 ## 5. Precomputed equity tables: sizes and build time
 
 ### Sizes
@@ -229,21 +253,83 @@ that M4 search compensates for a coarse blueprint, which is the paper's own argu
 | turn features (270,725 turn boards × 48 rivers × 1,081) | 270,725 | 1.4 × 10¹⁰ | ~20× fewer |
 | flop features (22,100 flops × 1,176 run-outs × 1,081) | 22,100 | 2.8 × 10¹⁰ | 2.2 × 10⁹ (1,755 canonical flops) |
 
-### Build time on this CPU (i7-10750H, 6 cores / 12 threads): **estimate, unmeasured**
+### Measured: evaluator and river equity on this CPU
 
-| step | estimate |
-|---|---|
-| Evaluator throughput assumed | 50 M evals/s per thread (pure-Rust lookup evaluator), ≈ 7.5 effective cores with HT → ~375 M evals/s. Fast table evaluators reach 100–300 M/s/thread, so this is deliberately conservative. |
-| flop features | ~10 s (isomorphic) |
-| turn features | ~40 s plain, a few seconds isomorphic; equity bookkeeping roughly doubles it |
-| river threshold fit | ~10–20 s (one pass over river boards, equity histogram, 1-D k-means) |
-| flop k-means (1.29 M × 256 centroids × 50 B × ~50 iterations) | ~1–5 min |
-| turn k-means (fit on 5 M subsample × 256 × 46 B × ~30 iterations + one full 55 M assignment pass) | ~5–20 min |
-| **total** | **~10–30 min**, dominated by turn clustering. Peak RAM ~3 GiB if turn features are materialised, < 1 GiB streamed. |
+Reproduce: `cd engine && cargo run --release --bin eval_bench`. Conditions: i7-10750H, on AC
+power, Windows "Balanced" plan (left unchanged), fixed seeds, median of 3 runs (min–max in
+brackets).
 
-The first M2 implementation task is to write the evaluator and benchmark it here, then
-replace these estimates with measured numbers. Laptop thermal throttling is the largest
-unknown (section 6).
+The evaluator is `engine/nlhe/src/eval.rs`: pure Rust, no tables, suit-lane bitmasks. It is
+verified against:
+- the published category counts over all 2,598,960 five-card and all 133,784,560
+  seven-card hands
+- 7,462 and 4,824 distinct strength classes
+- a best-of-21-subsets oracle on 50,000 random hands
+
+| measurement | result |
+|---|---:|
+| random 7-card evals, 1 thread | **62.6 M/s** (62.5–63.0) |
+| random 7-card evals, 6 threads | **272 M/s** (270–276) |
+| random 7-card evals, 12 threads | **378 M/s** (339–381) |
+| full enumeration of all 7-card hands, 1 thread (incremental masks) | 77.4 M/s |
+| river equity, **one** hand vs a random hand (990 opponent evals) | **26.2 µs/call** (25.8–26.4) |
+| river equity, **all 1,081** hands on one board (batch) | **33.2 µs/board** (32.3–33.5) → 5.5 µs per player if all 6 need it |
+| whole-board batches, 1 / 6 / 12 threads | 30.0 k / 132 k / 181 k boards/s |
+
+Scaling: 6 threads = 4.35× one thread (turbo drops with more busy cores). 12 threads = 1.39×
+six threads. Hyper-threading helps this compute-bound work by ~39%, which is input to the
+section 6 decision.
+
+### Build time from measured throughput (12 threads)
+
+| step | time |
+|---|---:|
+| river equities for all 2,598,960 boards | 14.4 s |
+| turn features: 270,725 turn boards × 48 rivers (no isomorphism) | 72 s |
+| flop features: 1,755 canonical flops × 1,176 run-outs | 11 s |
+| flop k-means (1.29 M × 256 × 50 B × ~50 iterations) | ~1–5 min (estimate) |
+| turn k-means (5 M subsample fit + one 55 M assignment pass) | ~5–20 min (estimate) |
+| **total** | **~10–25 min**. Equity work is now measured at ~1.6 min; clustering is still an estimate. |
+
+### River equity cost per call: above the ~10 µs target
+
+In external-sampling MCCFR the board and all hole cards are sampled once per iteration, so
+river buckets are needed at most once per iteration per player. Neither measured option meets
+~10 µs per call:
+- **Single hand:** 26 µs per call. Up to 157 µs per iteration if all 6 players need it.
+- **Whole-board batch:** 33 µs per iteration covers everyone. This is the better base option.
+- **Hard floor:** any exact method needs all ~1,081 opponent strengths, so ≥ 17 µs per board
+  at 62.6 M evals/s. Only a faster evaluator lowers that floor.
+
+Options, in order of preference:
+
+1. **Lazy whole-board batch, optimised.** Compute it the first time an iteration reaches a
+   river node; preflop-ending traversals then cost nothing. Expected cost ~15–25 µs per
+   iteration. Two speed-ups:
+   - Replace the sort with a counting pass over a dense strength index (4,824 classes).
+   - Hoist the board's suit and rank lanes out of the 1,081-hand loop.
+
+   Whether 15–25 µs matters depends on MCCFR's own per-iteration cost, measured in M3.
+   If equity is under ~20% of iteration time, stop here.
+2. **River bucket table, u8 per canonical river hand.**
+   - 2,428,287,420 entries = 2.26 GiB, built in ~15 s of equity plus indexing.
+   - Lookup cost is one hand-isomorphism index plus a memory access (~0.1–0.3 µs).
+   - Doesn't fit beside config A at 256 buckets: 9.86 + 2.26 = 12.1 GiB. It does fit if
+     post-flop buckets drop to ~200 (≈ 7.8 + 2.26 ≈ 10.1 GiB).
+   - Partial version: table only the most frequent river boards. Not useful here, because
+     sampling is uniform over boards and so there are no hot boards.
+3. **Board reuse across K iterations.** Sample one river board and run K iterations with
+   fresh hole cards and earlier-street cards consistent with it. Cost becomes 33 / K µs.
+   - Unbiased per iteration, but consecutive samples are correlated, which adds variance.
+   - Needs a convergence check on Leduc before adoption.
+4. **Cheaper feature, e.g. a global 7-card strength percentile** (1 eval + lookup, ~20 ns).
+   It ignores how the board changes the opponent distribution, so it is a much worse feature.
+   Rejected unless 1–3 fail.
+5. **Faster evaluator** (perfect-hash tables, ~100–200 KiB). Typically 2–3× faster on random
+   hands. It lowers both the floor and all build times. Worth doing if 1 is close to the line.
+
+Recommendation: implement option 1 first, and re-decide with the M3 iteration-cost
+measurement. Option 2 is the fallback, at the price of ~56 fewer post-flop buckets.
 
 ## 6. Throughput test plan: 6 vs 12 threads
 
@@ -298,7 +384,17 @@ correctness gate.
 
 ## 7. Open items before M2 implementation
 
-- **RAM decision (16 vs 32 GB)** picks config A or B. Both are ready as config files.
+- **RAM decision: config A (`m2_11g`), no RAM purchase.** Revisit config B only if M3
+  convergence measures flatten early on 11g.
+- **Off-tree actions need action translation in M4.** The blueprint has no limps outside
+  the SB (`limp = sb`), no sized bets in pots with 4+ players (`crowded_players = 4`), and a
+  discrete size set. Real opponents (including the human hands in the Pluribus logs) will
+  limp and use other sizes. M4 must map them onto the tree (pseudo-harmonic translation, as
+  in the paper) or re-solve from the off-tree node with search.
+- **River buckets use equity against a random hand, which ignores ranges.** Two hands with
+  equal equity against a uniform opponent can differ greatly against the range that actually
+  reaches the river. The blueprint accepts this coarseness; M4 search, with ranges carried
+  through the hand, refines it.
 - **PDF check:**
   - Pluribus' bucket counts, action abstraction and regret storage
   - average strategy updated only on the first round (affects `avg_strategy_streets`)
