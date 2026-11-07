@@ -8,15 +8,18 @@
 //!   regrets        pairs_s * regret_bytes                       (all streets)
 //!   avg strategy   pairs_s * avg_bytes  only on `avg_strategy_streets` (Pluribus: preflop)
 //!   node index     betting_nodes * index_bytes                  (offset into the flat arrays)
-//!   bucket tables  canonical hands * (1 or 2 bytes) for flop and turn; the river bucket is
-//!                  computed on the fly from equity thresholds (0 bytes), or optionally tabled.
+//!   bucket tables  direct-indexed (hole, board) entries * (1 or 2 bytes) for flop and turn
+//!                  (see index.rs); the river is computed on the fly from equity cut-offs
+//!                  (0 bytes) or tabled, per the config's `river_method`.
 //! Not included: OS, the rest of the process, per-thread scratch (small), and the
 //! one-off memory needed to *build* the abstraction.
 
 use crate::betting::TreeCounts;
-use crate::config::AbstractionConfig;
+use crate::config::{AbstractionConfig, RiverMethod};
+use crate::index::ENTRIES;
 
-/// Suit-isomorphic canonical (hole, board) counts per street (Waugh 2013, hand isomorphism).
+/// Suit-isomorphic canonical (hole, board) counts per street (Waugh 2013), for reference only;
+/// the tables use direct indexing (`index::ENTRIES`).
 pub const CANONICAL_HANDS: [u64; 4] = [169, 1_286_792, 55_190_538, 2_428_287_420];
 
 pub const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -26,14 +29,12 @@ pub struct ByteModel {
     pub regret_bytes: u64,
     pub avg_bytes: u64,
     pub index_bytes: u64,
-    /// Store a river bucket table (2.43e9 entries) instead of computing river buckets on the fly.
-    pub river_table: bool,
 }
 
 impl Default for ByteModel {
     fn default() -> Self {
         // i32 regrets and u32 average-strategy counts, as Pluribus stored them.
-        ByteModel { regret_bytes: 4, avg_bytes: 4, index_bytes: 8, river_table: false }
+        ByteModel { regret_bytes: 4, avg_bytes: 4, index_bytes: 8 }
     }
 }
 
@@ -84,8 +85,8 @@ pub fn estimate(counts: &TreeCounts, cfg: &AbstractionConfig, m: &ByteModel) -> 
         let pairs = counts.actions[s] * b;
         let table_bytes = match s {
             0 => 0,
-            3 if !m.river_table => 0,
-            _ => CANONICAL_HANDS[s] * bucket_id_bytes(b),
+            3 if cfg.river_method == RiverMethod::OnTheFly => 0,
+            _ => ENTRIES[s] * bucket_id_bytes(b),
         };
         StreetEstimate {
             nodes: counts.nodes[s],
@@ -156,27 +157,31 @@ mod tests {
         assert_eq!(e.streets[0].avg_bytes, 30 * 169 * 4); // preflop average strategy
         assert_eq!(e.streets[1].avg_bytes, 0);
         assert_eq!(e.streets[3].pairs, 25_000 * 200);
-        assert_eq!(e.streets[1].table_bytes, 1_286_792); // 1 byte per canonical flop hand
-        assert_eq!(e.streets[2].table_bytes, 55_190_538);
+        assert_eq!(e.streets[1].table_bytes, 25_989_600); // 1 byte per (hole, flop)
+        assert_eq!(e.streets[2].table_bytes, 305_377_800);
         assert_eq!(e.streets[3].table_bytes, 0); // river on the fly
         assert_eq!(e.index_bytes, 11_110 * 8);
-        let expected = 30 * 169 * 8 + (250 + 2_500 + 25_000) * 200 * 4 + 1_286_792 + 55_190_538 + 11_110 * 8;
+        let expected = 30 * 169 * 8 + (250 + 2_500 + 25_000) * 200 * 4 + 25_989_600 + 305_377_800 + 11_110 * 8;
         assert_eq!(e.total_bytes, expected);
     }
 
     #[test]
     fn bucket_ids_widen_above_256_and_river_table_option() {
-        let m = ByteModel { river_table: true, ..ByteModel::default() };
-        let e = estimate(&counts(), &cfg([169, 300, 300, 300]), &m);
-        assert_eq!(e.streets[1].table_bytes, 2 * 1_286_792);
-        assert_eq!(e.streets[3].table_bytes, 2 * 2_428_287_420);
+        let mut c = cfg([169, 300, 300, 300]);
+        c.river_method = RiverMethod::PrecomputedTable;
+        let e = estimate(&counts(), &c, &ByteModel::default());
+        assert_eq!(e.streets[1].table_bytes, 2 * 25_989_600);
+        assert_eq!(e.streets[3].table_bytes, 2 * 2_809_475_760);
+        c.buckets = [169, 256, 256, 256];
+        let e = estimate(&counts(), &c, &ByteModel::default());
+        assert_eq!(e.streets[3].table_bytes, 2_809_475_760); // 2.62 GiB at u8
     }
 
     #[test]
     fn max_equal_buckets_is_tight() {
         let c = cfg([169, 1, 1, 1]);
         let m = ByteModel::default();
-        let budget = 300_000_000;
+        let budget = 1_000_000_000; // above the fixed ~331 MB of flop+turn tables
         let b = max_equal_buckets(&counts(), &c, &m, budget).unwrap();
         let at = |b| estimate(&counts(), &cfg([169, b, b, b]), &m).total_bytes;
         assert!(at(b) <= budget);

@@ -32,6 +32,17 @@ original's strength is not a goal.
 - Fixed RNG seeds everywhere. Seeds are explicit parameters and get logged with results.
 - Every long run saves checkpoints periodically and can resume from the latest one.
 - `data/` is gitignored. Generated datasets are reproducible from scripts in `analysis/`.
+- **Linux-portable.** Code must build and run unchanged on Linux (HPC, SLURM): std-only Rust,
+  `PathBuf` paths, no Windows APIs, no shell-specific behaviour in binaries. Long runs take a
+  `--stop-file` and checkpoint on request. See `scripts/slurm_train.sh` (96 h jobs chained by
+  checkpoint).
+- Long local jobs run at below-normal priority and never longer than 2 hours unattended.
+
+## Commands
+- Engine tests: `cd engine && cargo test` (cargo is at `~/.cargo/bin`, not on PATH)
+- Python tests: `cd analysis && .venv/Scripts/python -m pytest -q tests`
+- M2 estimator: `cargo run --release --bin m2_estimate -- nlhe/configs/m2_11g.cfg`
+- Evaluator benchmark: `cargo run --release --bin eval_bench`
 
 ## Layout
 - `analysis/`: Python. Venv at `analysis/.venv` (Python 3.13). Packages: pokerkit, pandas,

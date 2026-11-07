@@ -39,6 +39,18 @@ pub struct AbstractionConfig {
     /// Post-flop, with at least this many players in the hand, no sized bets (check / call /
     /// fold / all-in only). 0 = off.
     pub crowded_players: u8,
+    /// How river buckets are obtained at training time.
+    pub river_method: RiverMethod,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RiverMethod {
+    /// Equity computed per iteration (lazy, only hands that reach the river), then the
+    /// bucket from equity cut-offs. No table memory.
+    OnTheFly,
+    /// u8/u16 bucket per (hole, river board): 2,809,475,760 entries (2.62 GiB at u8).
+    /// Meant for machines where that memory is free (e.g. HPC nodes).
+    PrecomputedTable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +110,7 @@ impl AbstractionConfig {
             avg_strategy_streets: [true, false, false, false],
             limp: Limp::All,
             crowded_players: 0,
+            river_method: RiverMethod::OnTheFly,
         };
         for (ln, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap().trim();
@@ -116,6 +129,17 @@ impl AbstractionConfig {
                         "sb" => Limp::Sb,
                         "all" => Limp::All,
                         _ => return Err(ConfigError(format!("limp: expected none|sb|all, got {v:?}"))),
+                    }
+                }
+                "river_method" => {
+                    c.river_method = match v {
+                        "on_the_fly" => RiverMethod::OnTheFly,
+                        "precomputed_table" => RiverMethod::PrecomputedTable,
+                        _ => {
+                            return Err(ConfigError(format!(
+                                "river_method: expected on_the_fly|precomputed_table, got {v:?}"
+                            )))
+                        }
                     }
                 }
                 "crowded_players" => {
@@ -224,6 +248,12 @@ mod tests {
         assert!(AbstractionConfig::parse("no equals sign").is_err());
         assert!(AbstractionConfig::parse("multiway.preflop.1 = 1.0").is_err());
         assert!(AbstractionConfig::parse("limp = maybe").is_err());
+        assert!(AbstractionConfig::parse("river_method = cached").is_err());
+        assert_eq!(AbstractionConfig::parse("").unwrap().river_method, RiverMethod::OnTheFly);
+        assert_eq!(
+            AbstractionConfig::parse("river_method = precomputed_table").unwrap().river_method,
+            RiverMethod::PrecomputedTable
+        );
     }
 
     #[test]

@@ -8,3 +8,4 @@ pub mod equity;
 pub mod estimate;
 pub mod eval;
 pub mod eval_lut;
+pub mod index;
