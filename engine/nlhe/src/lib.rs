@@ -2,6 +2,7 @@
 //! betting-tree counter, the blueprint memory estimator, a 7-card hand evaluator and river
 //! equity. Nothing here allocates strategy tables or trains.
 
+pub mod abstraction;
 pub mod betting;
 pub mod config;
 pub mod equity;
