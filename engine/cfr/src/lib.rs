@@ -13,6 +13,7 @@ pub mod cfr;
 pub mod checkpoint;
 pub mod fxhash;
 pub mod game;
+pub mod intregret;
 pub mod kuhn;
 pub mod leduc;
 pub mod mccfr;
