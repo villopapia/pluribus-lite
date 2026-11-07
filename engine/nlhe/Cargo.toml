@@ -1,0 +1,8 @@
+[package]
+name = "nlhe"
+version = "0.1.0"
+edition = "2021"
+description = "6-max no-limit hold'em abstraction design tools (M2): betting rules, tree counter, memory estimator"
+
+[dependencies]
+cfr = { path = "../cfr" }   # for FxHashMap only
