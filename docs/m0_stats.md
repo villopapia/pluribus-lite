@@ -42,6 +42,8 @@ VPIP/PFR denominators exclude walks (BB hands folded to Pluribus, where it never
 | C-bet (Pluribus was preflop aggressor, flop unbet when it acts) | 835 | 448 | 53.7% |
 | Donk bet (bets into the preflop aggressor, who acts later) | 612 | 13 | 2.1% |
 
+The donk row uses a loose v1 definition (flop only; Pluribus acts before the preflop aggressor, not necessarily first). See `m0_donk.md` for the strict definition (called the last bet, first to act, bets) by street, compared with the human players.
+
 C-bet heads-up: 57.0% (n = 746); multiway: 25.8% (n = 89).
 
 ## Action mix by street

@@ -84,3 +84,20 @@ def test_parse_rejects_missing_or_duplicate_bot():
     bad = HAND.replace("'Pluribus'", "'X'")
     with pytest.raises(ValueError):
         m0_parse.parse_hand(HandHistory.loads(bad), "bad")
+
+
+def test_donk_spots_strict_definition():
+    import m0_donk
+
+    hh = HandHistory.loads(HAND)
+    spots = m0_donk.donk_spots(list(hh.actions), list(hh.players), "t/1")
+    # flop: BB called Pluribus' open and is first to act -> opportunity, BB checks.
+    # turn: BB was the flop aggressor itself -> no opportunity.
+    assert len(spots) == 1
+    s = spots[0]
+    assert (s["player"], s["street"], s["donk"], s["players_seeing_street"]) == ("B", "flop", False, 2)
+
+    donk_hand = HAND.replace("'p2 cc', 'p3 cbr 275', 'p2 cbr 900', 'p3 cc'", "'p2 cbr 300', 'p3 cc'")
+    hh = HandHistory.loads(donk_hand)
+    spots = m0_donk.donk_spots(list(hh.actions), list(hh.players), "t/2")
+    assert [(x["street"], x["donk"], x["amount_to"]) for x in spots] == [("flop", True, 300)]

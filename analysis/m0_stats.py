@@ -213,6 +213,10 @@ def build_report(d: pd.DataFrame, h: pd.DataFrame, png_name: str) -> str:
         f"| C-bet (Pluribus was preflop aggressor, flop unbet when it acts) | {cn:,} | {ck:,} | {pct(cr)} |",
         f"| Donk bet (bets into the preflop aggressor, who acts later) | {dn:,} | {dk:,} | {pct(dr)} |",
         "",
+        "The donk row uses a loose v1 definition (flop only; Pluribus acts before the preflop "
+        "aggressor, not necessarily first). See `m0_donk.md` for the strict definition (called the "
+        "last bet, first to act, bets) by street, compared with the human players.",
+        "",
     ]
     # c-bet heads-up vs multiway
     hu = cbet[cbet.n_active == 2]

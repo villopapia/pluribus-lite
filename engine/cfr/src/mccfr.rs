@@ -40,6 +40,9 @@ pub struct MccfrConfig {
     pub discount_interval: u64,
     /// Accumulate phi only at rounds <= this (Pluribus: 0 = preflop).
     pub avg_max_round: u8,
+    /// NOT in the paper. In pruned traversals, always explore the action with the
+    /// highest regret even if it is <= C, so a node can never have every action pruned.
+    pub always_explore_best: bool,
 }
 
 impl MccfrConfig {
@@ -58,6 +61,7 @@ impl MccfrConfig {
             lcfr_threshold: frac(400.0),
             discount_interval: frac(10.0),
             avg_max_round: u8::MAX,
+            always_explore_best: false,
         }
     }
 
@@ -71,6 +75,7 @@ impl MccfrConfig {
             self.lcfr_threshold as f64,
             self.discount_interval as f64,
             self.avg_max_round as f64,
+            self.always_explore_best as u8 as f64,
         ]
     }
 
@@ -84,6 +89,8 @@ impl MccfrConfig {
             lcfr_threshold: p[5] as u64,
             discount_interval: p[6] as u64,
             avg_max_round: p[7] as u8,
+            // absent in checkpoints written before the flag existed
+            always_explore_best: p.get(8).is_some_and(|&x| x != 0.0),
         }
     }
 }
@@ -94,6 +101,11 @@ pub struct MccfrStats {
     pub full_traversals: u64,
     /// Actions skipped by negative-regret pruning.
     pub pruned_actions: u64,
+    /// Traverser decision nodes visited during pruned traversals.
+    pub pruned_traversal_nodes: u64,
+    /// Of those, nodes where every action had regret <= C. Without
+    /// `always_explore_best` nothing below them is explored and no regret is updated.
+    pub all_pruned_nodes: u64,
 }
 
 pub struct Mccfr<G: Game> {
@@ -240,8 +252,15 @@ impl<G: Game> Mccfr<G> {
                     let mut va = [0.0; MAX_ACTIONS];
                     let mut explored = [false; MAX_ACTIONS];
                     let mut v = 0.0;
+                    self.stats.pruned_traversal_nodes += 1;
+                    let c = self.cfg.prune_regret_c;
+                    if regret[..n].iter().all(|&r| r <= c) {
+                        self.stats.all_pruned_nodes += 1;
+                    }
+                    // first index of the maximum regret (deterministic tie-break)
+                    let best = (0..n).fold(0, |b, k| if regret[k] > regret[b] { k } else { b });
                     for k in 0..n {
-                        if regret[k] > self.cfg.prune_regret_c {
+                        if regret[k] > c || (self.cfg.always_explore_best && k == best) {
                             va[k] = self.traverse_pruned(&self.game.apply(s, acts.as_slice()[k]), i);
                             explored[k] = true;
                             v += sigma[k] * va[k];
@@ -394,6 +413,7 @@ mod tests {
             lcfr_threshold: 2,
             discount_interval: 1,
             avg_max_round: u8::MAX,
+            always_explore_best: false,
         };
         let mut s = Mccfr::new(Kuhn, cfg.clone());
         s.iterate();
@@ -406,6 +426,57 @@ mod tests {
                 assert!((inf.strat_sum[j] - 0.5 * u.strat_sum[j]).abs() < 1e-12);
             }
         }
+    }
+
+    fn all_pruned_cfg(always_explore_best: bool) -> MccfrConfig {
+        MccfrConfig {
+            seed: 4,
+            strategy_interval: 1,
+            prune_threshold: 0,      // prune from t = 1
+            explore_prob: 0.0,       // never take the unpruned branch
+            prune_regret_c: 1e18,    // every regret is <= C: every action pruned
+            lcfr_threshold: 0,
+            discount_interval: 1,
+            avg_max_round: u8::MAX,
+            always_explore_best,
+        }
+    }
+
+    #[test]
+    fn all_pruned_nodes_are_counted_and_frozen_without_flag() {
+        let mut s = Mccfr::new(Kuhn, all_pruned_cfg(false));
+        s.run(1_000);
+        assert!(s.stats.pruned_traversal_nodes > 0);
+        assert_eq!(s.stats.all_pruned_nodes, s.stats.pruned_traversal_nodes);
+        // nothing is ever explored, so no regret ever moves
+        assert!(s.table.map.values().all(|inf| inf.regret.iter().all(|&r| r == 0.0)));
+    }
+
+    #[test]
+    fn always_explore_best_keeps_learning() {
+        let mut s = Mccfr::new(Kuhn, all_pruned_cfg(true));
+        s.run(1_000);
+        assert_eq!(s.stats.all_pruned_nodes, s.stats.pruned_traversal_nodes);
+        assert!(s.table.map.values().any(|inf| inf.regret.iter().any(|&r| r != 0.0)));
+    }
+
+    #[test]
+    fn always_explore_best_converges_with_aggressive_pruning() {
+        let total = 1_000_000;
+        let mut cfg = MccfrConfig::pluribus_scaled(total, Kuhn.max_abs_utility(), 2);
+        cfg.prune_regret_c = -5.0;
+        cfg.always_explore_best = true;
+        let mut s = Mccfr::new(Kuhn, cfg);
+        s.run(total);
+        let e = exploitability(&Kuhn, &s.average_policy());
+        assert!(e < 0.01, "exploitability {e}");
+    }
+
+    #[test]
+    fn old_checkpoint_params_default_flag_off() {
+        let mut p = MccfrConfig::pluribus_scaled(100, 2.0, 1).to_params();
+        p.truncate(8);
+        assert!(!MccfrConfig::from_params(&p).always_explore_best);
     }
 
     #[test]
