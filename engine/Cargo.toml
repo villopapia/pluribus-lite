@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["cfr"]
+
+# Pure Rust only: no dependencies that need a C/C++ toolchain (see CLAUDE.md).
+
+[profile.dev]
+opt-level = 3        # tests run solvers for millions of iterations
+
+[profile.release]
+codegen-units = 1

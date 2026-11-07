@@ -1,0 +1,8 @@
+[package]
+name = "cfr"
+version = "0.1.0"
+edition = "2021"
+description = "CFR / MCCFR correctness harness for pluribus-lite (Kuhn, Leduc)"
+
+[dependencies]
+# intentionally none

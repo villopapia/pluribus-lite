@@ -1,0 +1,18 @@
+# Data and generated artifacts (never committed)
+data/
+checkpoints/
+*.parquet
+
+# Python
+analysis/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Rust
+engine/target/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
