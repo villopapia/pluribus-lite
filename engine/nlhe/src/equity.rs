@@ -283,23 +283,54 @@ impl RiverBatch {
     /// River equities of only the given hero hands (what one MCCFR iteration needs: at most
     /// six). Cost: one class fill for the board plus one branchless 1,326-entry pass per hero.
     pub fn compute_heroes(&mut self, board: &[u8; 5], heroes: &[(u8, u8)], out: &mut [f32]) {
-        let mut classes = [0u16; COMBOS];
-        let mut masks = [0u64; COMBOS];
-        self.fill_classes(board, &mut classes, &mut masks);
+        let mut hr = HeroRiver::new();
+        hr.prepare(self, board);
         for (h, &(a, b)) in heroes.iter().enumerate() {
-            let hi = combo_index(a, b);
-            let hc = classes[hi];
-            let hm = masks[hi];
-            debug_assert!(hc != u16::MAX, "hero shares a card with the board");
-            let (mut win, mut tie) = (0u32, 0u32);
-            for j in 0..COMBOS {
-                let ok = (masks[j] & hm == 0) as u32; // disjoint from hero, valid
-                win += ok & (classes[j] < hc) as u32;
-                tie += ok & (classes[j] == hc) as u32;
-            }
-            out[h] = (win as f32 + 0.5 * tie as f32) / 990.0;
+            out[h] = hr.equity(a, b);
         }
     }
+}
+
+/// Lazy river equities for MCCFR: `prepare` once per sampled board (class fill), then
+/// `equity` per hero hand that actually reaches a river decision.
+pub struct HeroRiver {
+    classes: Box<[u16; COMBOS]>,
+    masks: Box<[u64; COMBOS]>,
+}
+
+impl Default for HeroRiver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HeroRiver {
+    pub fn new() -> Self {
+        HeroRiver { classes: Box::new([0; COMBOS]), masks: Box::new([0; COMBOS]) }
+    }
+
+    pub fn prepare(&mut self, rb: &mut RiverBatch, board: &[u8; 5]) {
+        rb.fill_classes(board, &mut self.classes, &mut self.masks);
+    }
+
+    /// Equity of (a, b) against one random opponent hand on the prepared board.
+    #[inline]
+    pub fn equity(&self, a: u8, b: u8) -> f32 {
+        let hi = combo_index(a, b);
+        let hc = self.classes[hi];
+        let hm = self.masks[hi];
+        debug_assert!(hc != u16::MAX, "hero shares a card with the board");
+        let (mut win, mut tie) = (0u32, 0u32);
+        for j in 0..COMBOS {
+            let ok = (self.masks[j] & hm == 0) as u32; // disjoint from hero, valid
+            win += ok & (self.classes[j] < hc) as u32;
+            tie += ok & (self.classes[j] == hc) as u32;
+        }
+        (win as f32 + 0.5 * tie as f32) / 990.0
+    }
+}
+
+impl RiverBatch {
 
     /// Previous implementation (oracle evaluator + comparison sort), kept for tests/benchmarks.
     pub fn compute_oracle(&mut self, board: &[u8; 5]) {

@@ -4,6 +4,8 @@
 
 pub mod abstraction;
 pub mod betting;
+pub mod blueprint;
+pub mod buckets;
 pub mod config;
 pub mod equity;
 pub mod estimate;

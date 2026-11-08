@@ -402,3 +402,43 @@ correctness gate.
 - **Not modelled:**
   - A short all-in raise reopening betting is a simplification (adds a few nodes).
   - The blueprint does not distinguish suits beyond isomorphism.
+
+## 8. Update 2026-11-08 (overnight): what changed since the accepted design
+
+These supersede the corresponding numbers above.
+
+- **Table indexing is direct, not suit-isomorphic** (`engine/nlhe/src/index.rs`).
+  Index = combo × C(50, k) + colex(board). Lookup is a few integer operations and it is
+  bijection-tested on all 26M (hole, flop) pairs.
+  - Tables: flop 24.8 MiB (was 1.2), turn 291 MiB (was 53), optional river 2.62 GiB
+    (was 2.26).
+  - Build time is unchanged, because features are computed per board for all hands at once.
+  - Estimator: **m2_11g = 10.11 GiB** (was 9.86), m2_26g = 25.92 GiB.
+- **`river_method = on_the_fly | precomputed_table`** is now a config key (default
+  `on_the_fly`). The estimator prices the 2.62 GiB river table only when it is selected.
+- **Evaluator** (`eval_lut.rs`): a base-5 rank-key table plus a flush table, with dense
+  classes 0..7461.
+  - It matches the `eval.rs` oracle on every 5-, 6- and 7-card hand.
+  - Throughput: 148 M evals/s on 1 thread (2.35× the oracle), 586 M on 6 threads, 663 M on 12.
+- **River equity, re-benchmarked:**
+  - Whole board: **17.8 µs** (was 33.2). It uses rank-pair class lookups (91 per board),
+    flush lookups only where a flush is possible, and a radix sort.
+  - MCCFR path (`HeroRiver`, lazy): class fill once per board, then one branchless pass per
+    hero. **6.8 µs for 1 hero, 8.5 µs for 2, 12.5 µs for 6.**
+  - Rivers in the Pluribus logs are 84% heads-up, so the common case is under 10 µs.
+- **Integer regrets** (`cfr::intregret`): exact round-half-to-even discounting, plus floor and
+  saturation counters. Tests show no drift over 40 discount steps (mean error < 0.02 chips,
+  within the analytic bound), while floor rounding drifts below −1 chip (the test asserts this, to show it can detect drift).
+- **Card abstraction built** (`docs/m2_abstraction_build.md`): 410.7 s on 12 threads at
+  below-normal priority, peak 593 MB.
+  - Flop and turn: 256 buckets each, none empty. Sizes range 0.19–2.44× the mean (flop) and
+    0.12–2.94× (turn).
+  - k-medians stopped at the 30-iteration cap with 0.46% (flop) and 0.28% (turn) of points
+    still moving.
+  - **River: 247 effective buckets**, because 9 one-dimensional centroids coincided on
+    discrete equity values and were merged. Decision pending: set `buckets` river = 247, or
+    switch the river to equal-mass quantile cut-offs (exactly k buckets).
+- **Possible build speed-up (not needed now):**
+  - Exact pruning in `nearest`: |Σx − Σc| ≤ L1(x, c), and centroids are sorted by sum, so
+    search outward from the closest sum and stop once the sum gap exceeds the best distance.
+  - Turn assignment (241 s) is the step this would help.
