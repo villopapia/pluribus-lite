@@ -20,3 +20,15 @@ Run 2026-11-07 23:39, below-normal priority, 12 threads. Peak working set 593 MB
   - bucket sizes over all (hole, board) pairs: buckets 256, entries 305377800, empty 0, min 140976 (0.12x mean), p10 535044, median 1068480, p90 2044332, max 3506628 (2.94x mean)
   - centroid mean equity: lowest 0.076, median 0.480, highest 0.991
 - total wall time 410.7s
+
+## River rebuild 2026-11-08: equal-mass cut-offs (exactly 256 buckets)
+
+The 1-D k-means river (247 effective buckets) was replaced by equal-mass cut-offs
+(`river_cutoffs_equal_mass`). Only the river stage was rebuilt (flop/turn skipped via
+resume). The old file was kept as `river_kmeans247.cut.bak`.
+
+- river: equity histogram over 2,598,960 boards 9.7 s; 255 cut-offs = **256 buckets, none
+  empty**.
+- Mass per bucket: min 0.03× mean, median 1.0×, max 3.67× mean. Imbalance comes from point
+  masses: a single equity value, e.g. board-playing ties, can't be split by an equity
+  threshold.

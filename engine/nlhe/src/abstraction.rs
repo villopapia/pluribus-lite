@@ -371,6 +371,37 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
     cent.windows(2).map(|w| (0.5 * (w[0] + w[1])) as f32).collect()
 }
 
+/// Equal-mass cut-offs giving **exactly k non-empty buckets** (needs >= k non-empty bins).
+/// Walks the non-empty bins in order and closes a bucket once its mass reaches the remaining
+/// mass divided by the remaining buckets, or when the remaining non-empty bins are only
+/// just enough for the remaining buckets. A point mass larger than 1/k simply gets its own
+/// (heavier) bucket. Cut-offs sit midway between consecutive non-empty bins.
+pub fn river_cutoffs_equal_mass(hist: &[u64], k: usize) -> Vec<f32> {
+    let nb = hist.len();
+    let x = |b: usize| b as f64 / (nb - 1) as f64;
+    let nonempty: Vec<usize> = (0..nb).filter(|&b| hist[b] > 0).collect();
+    assert!(k >= 1 && nonempty.len() >= k, "need at least k non-empty bins");
+    let mut remaining_mass: u64 = hist.iter().sum();
+    let mut remaining_buckets = k;
+    let mut acc = 0u64;
+    let mut cuts = Vec::with_capacity(k - 1);
+    for (r, &b) in nonempty.iter().enumerate() {
+        acc += hist[b];
+        let bins_left = nonempty.len() - r - 1;
+        if remaining_buckets > 1 && bins_left > 0 {
+            let target = remaining_mass as f64 / remaining_buckets as f64;
+            if acc as f64 >= target || bins_left == remaining_buckets - 1 {
+                cuts.push((0.5 * (x(b) + x(nonempty[r + 1]))) as f32);
+                remaining_mass -= acc;
+                remaining_buckets -= 1;
+                acc = 0;
+            }
+        }
+    }
+    debug_assert_eq!(cuts.len(), k - 1);
+    cuts
+}
+
 #[inline]
 pub fn river_bucket(cutoffs: &[f32], equity: f32) -> usize {
     cutoffs.partition_point(|&c| c <= equity)
@@ -679,6 +710,39 @@ mod tests {
         assert_eq!(river_bucket(&cuts, 0.1), 0);
         assert_eq!(river_bucket(&cuts, 0.5), 1);
         assert_eq!(river_bucket(&cuts, 0.95), 2);
+    }
+
+    fn bucket_masses(h: &[u64], cuts: &[f32]) -> Vec<u64> {
+        let mut m = vec![0u64; cuts.len() + 1];
+        for (b, &w) in h.iter().enumerate() {
+            m[river_bucket(cuts, b as f32 / (h.len() - 1) as f32)] += w;
+        }
+        m
+    }
+
+    #[test]
+    fn equal_mass_cutoffs_give_exactly_k_buckets() {
+        // uniform: equal masses
+        let h = vec![10u64; 1000];
+        let cuts = river_cutoffs_equal_mass(&h, 10);
+        assert_eq!(cuts.len(), 9);
+        assert!(cuts.windows(2).all(|w| w[0] < w[1]));
+        assert!(bucket_masses(&h, &cuts).iter().all(|&m| m == 1000));
+        // heavy point masses (like split pots) still give exactly k non-empty buckets
+        let mut h = vec![0u64; 65_536];
+        let mut rng = Rng::new(3);
+        for _ in 0..5_000 {
+            h[(rng.next_u64() % 65_536) as usize] += 1 + rng.next_u64() % 50;
+        }
+        h[32_768] += 2_000_000; // equity 0.5 point mass, far above 1/k of the total
+        h[0] += 300_000;
+        let cuts = river_cutoffs_equal_mass(&h, 256);
+        assert_eq!(cuts.len(), 255);
+        let m = bucket_masses(&h, &cuts);
+        assert_eq!(m.len(), 256);
+        assert!(m.iter().all(|&x| x > 0), "empty bucket");
+        // k-means on the same histogram merges centroids
+        assert!(river_cutoffs(&h, 256, 500).len() < 255);
     }
 
     #[test]

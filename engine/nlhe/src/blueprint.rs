@@ -227,14 +227,20 @@ pub struct Schedule {
     pub explore_prob: f64,
     pub prune_c: i32,
     pub floor: i32,
-    /// Unverified paper detail (pending the PDF): skip pruning on the river and on actions
-    /// that end the hand. Default off = same behaviour as M1's mccfr.rs.
+    /// Paper (supplement pp. 3, 14): pruning never skips actions on the final betting round
+    /// or actions that immediately lead to a terminal node. Default true (paper-faithful).
     pub prune_skip_river_and_terminal: bool,
+    /// First discount boundary (k = 1). 0 means "discount_every" (boundaries at multiples).
+    pub discount_base: u64,
+    /// Post-flop snapshot averaging (paper p. 15: every 200 min after the first 800 min).
+    /// `snapshot_every == 0` disables it.
+    pub snapshot_after: u64,
+    pub snapshot_every: u64,
 }
 
 impl Schedule {
-    /// Pluribus' wall-clock schedule (unverified: prune after 200 min, LCFR until 400 min,
-    /// discount every 10 min, of an ~11,520 min run) as fractions of `planned` iterations.
+    /// Pluribus' wall-clock schedule as fractions of `planned` iterations (prune 200, LCFR 400,
+    /// discount 10 of ~11,520 minutes). Used for tests and short runs.
     pub fn pluribus_scaled(planned: u64, strategy_interval: u64) -> Schedule {
         let f = |m: f64| ((planned as f64 * m / 11_520.0).round() as u64).max(1);
         Schedule {
@@ -245,8 +251,83 @@ impl Schedule {
             explore_prob: 0.05,
             prune_c: cfr::intregret::PRUNE_THRESHOLD,
             floor: cfr::intregret::REGRET_FLOOR,
-            prune_skip_river_and_terminal: false,
+            prune_skip_river_and_terminal: true,
+            discount_base: 0,
+            snapshot_after: f(800.0),
+            snapshot_every: f(200.0),
         }
+    }
+
+    /// Schedule used during the warm-up: no pruning, no discounting, no snapshots.
+    pub fn warmup(strategy_interval: u64) -> Schedule {
+        Schedule {
+            strategy_interval,
+            prune_after: u64::MAX,
+            lcfr_until: 0,
+            discount_every: 1,
+            explore_prob: 0.05,
+            prune_c: cfr::intregret::PRUNE_THRESHOLD,
+            floor: cfr::intregret::REGRET_FLOOR,
+            prune_skip_river_and_terminal: true,
+            discount_base: 0,
+            snapshot_after: u64::MAX,
+            snapshot_every: 0,
+        }
+    }
+
+    /// The paper's schedule in minutes (prune after 200, discount every 10 until 400,
+    /// snapshots every 200 after 800), mapped to iterations after a warm-up of `10 * scale`
+    /// minutes that ended at iteration `warmup_iters`, at `iters_per_min` from then on.
+    /// The first discount (T = 10 min, k = 1) falls exactly at the end of the warm-up.
+    pub fn paper_minutes(warmup_iters: u64, iters_per_min: f64, strategy_interval: u64, scale: f64) -> Schedule {
+        let w = 10.0 * scale;
+        let at = |m: f64| warmup_iters + ((m * scale - w).max(0.0) * iters_per_min).round() as u64;
+        let span = |m: f64| ((m * scale * iters_per_min).round() as u64).max(1);
+        Schedule {
+            strategy_interval,
+            prune_after: at(200.0),
+            lcfr_until: at(400.0),
+            discount_every: span(10.0),
+            explore_prob: 0.05,
+            prune_c: cfr::intregret::PRUNE_THRESHOLD,
+            floor: cfr::intregret::REGRET_FLOOR,
+            prune_skip_river_and_terminal: true,
+            discount_base: warmup_iters.max(1),
+            snapshot_after: at(800.0),
+            snapshot_every: span(200.0),
+        }
+    }
+
+    fn base(&self) -> u64 {
+        if self.discount_base > 0 { self.discount_base } else { self.discount_every }
+    }
+
+    /// Discount step k due after completing iteration t (paper: t < LCFR threshold).
+    pub fn discount_k(&self, t: u64) -> Option<u64> {
+        let b = self.base();
+        if t == 0 || t >= self.lcfr_until || t < b || (t - b) % self.discount_every != 0 {
+            return None;
+        }
+        Some((t - b) / self.discount_every + 1)
+    }
+
+    /// Next discount boundary strictly after t, if any.
+    pub fn next_discount(&self, t: u64) -> Option<u64> {
+        let b = self.base();
+        let n = if t < b { b } else { b + ((t - b) / self.discount_every + 1) * self.discount_every };
+        (n < self.lcfr_until).then_some(n)
+    }
+
+    pub fn snapshot_due(&self, t: u64) -> bool {
+        self.snapshot_every > 0 && t >= self.snapshot_after && (t - self.snapshot_after) % self.snapshot_every == 0
+    }
+
+    pub fn next_snapshot(&self, t: u64) -> Option<u64> {
+        if self.snapshot_every == 0 || self.snapshot_after == u64::MAX {
+            return None;
+        }
+        let a = self.snapshot_after;
+        Some(if t < a { a } else { a + ((t - a) / self.snapshot_every + 1) * self.snapshot_every })
     }
 }
 
@@ -258,6 +339,9 @@ pub struct ThreadStats {
     pub river_calls: u64,
     pub nodes: u64,
     pub pruned_actions: u64,
+    /// traversals, and traversals that reached at least one river decision node
+    pub traversals: u64,
+    pub river_reached: u64,
     pub regret: RegretStats,
 }
 
@@ -269,6 +353,8 @@ impl ThreadStats {
         self.river_calls += o.river_calls;
         self.nodes += o.nodes;
         self.pruned_actions += o.pruned_actions;
+        self.traversals += o.traversals;
+        self.river_reached += o.river_reached;
         self.regret.saturated += o.regret.saturated;
         self.regret.floored += o.regret.floored;
     }
@@ -281,6 +367,8 @@ pub struct Deal {
     pub bucket: [[u16; 4]; MAX_P],
     pub sd: [u16; MAX_P],
     river_ready: bool,
+    /// set when the current traversal visits a river decision node
+    pub reached_river: bool,
     rb: RiverBatch,
     hr: HeroRiver,
     pub rng: Rng,
@@ -307,6 +395,7 @@ impl Deal {
             bucket: [[0; 4]; MAX_P],
             sd: [0; MAX_P],
             river_ready: false,
+            reached_river: false,
             rb: RiverBatch::new(),
             hr: HeroRiver::new(),
             rng: Rng::new(0),
@@ -384,7 +473,10 @@ impl<'a> Trainer<'a> {
                 self.update_strategy(0, i, d, ts);
             }
             let prune = t > self.sched.prune_after && d.rng.next_f64() >= self.sched.explore_prob;
+            d.reached_river = false;
             self.traverse(0, i, prune, d, ts);
+            ts.traversals += 1;
+            ts.river_reached += d.reached_river as u64;
         }
         ts.iterations += 1;
         ts.traverse_ns += t0.elapsed().as_nanos() as u64;
@@ -420,6 +512,7 @@ impl<'a> Trainer<'a> {
         let n = nd.n as usize;
         let p = nd.player as usize;
         let street = nd.street as usize;
+        d.reached_river |= street == 3;
         let b = d.bucket(self.abs, p, street, ts);
         let base = self.tree.roff[node as usize] + (b * n) as u64;
         let mut s = [0.0; MAX_A];
@@ -511,7 +604,7 @@ impl<'a> Trainer<'a> {
 // ------------------------------------------------------------------ checkpoints
 
 const MAGIC: &[u8; 4] = b"PLBP";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CkptMeta {
@@ -521,6 +614,8 @@ pub struct CkptMeta {
     pub seed: u64,
     pub elapsed_secs: f64,
     pub sched: Schedule,
+    /// post-flop snapshots accumulated so far
+    pub snapshots: u64,
 }
 
 struct Fnv(u64);
@@ -561,6 +656,9 @@ pub fn save_checkpoint(path: &Path, meta: &CkptMeta, tree: &Tree, st: &Storage) 
         for x in [s.prune_c, s.floor, s.prune_skip_river_and_terminal as i32] {
             w.write_all(&x.to_le_bytes())?;
         }
+        for x in [s.discount_base, s.snapshot_after, s.snapshot_every, meta.snapshots] {
+            w.write_all(&x.to_le_bytes())?;
+        }
         let mut buf = Vec::with_capacity(1 << 20);
         for chunk in st.regrets.chunks(1 << 18) {
             buf.clear();
@@ -596,8 +694,9 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
         return Err(bad("bad magic".into()));
     }
     r.read_exact(&mut b4)?;
-    if u32::from_le_bytes(b4) != VERSION {
-        return Err(bad("bad version".into()));
+    let version = u32::from_le_bytes(b4);
+    if version != 1 && version != 2 {
+        return Err(bad(format!("unsupported checkpoint version {version}")));
     }
     r.read_exact(&mut b4)?;
     let mut name = vec![0u8; u32::from_le_bytes(b4) as usize];
@@ -621,6 +720,14 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
     for x in i.iter_mut() {
         r.read_exact(&mut b4)?;
         *x = i32::from_le_bytes(b4);
+    }
+    // v2: discount_base, snapshot_after, snapshot_every, snapshots (v1: none of these)
+    let mut v2 = [0u64; 4];
+    if version >= 2 {
+        for x in v2.iter_mut() {
+            r.read_exact(&mut b8)?;
+            *x = u64::from_le_bytes(b8);
+        }
     }
     if u[2] != tree.n_regrets || u[3] != tree.n_avg || buckets != tree.buckets {
         return Err(bad(format!("checkpoint shape {:?}/{}/{} does not match tree {:?}/{}/{}", buckets, u[2], u[3], tree.buckets, tree.n_regrets, tree.n_avg)));
@@ -662,8 +769,115 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
             prune_c: i[0],
             floor: i[1],
             prune_skip_river_and_terminal: i[2] != 0,
+            discount_base: v2[0],
+            snapshot_after: if version >= 2 { v2[1] } else { u64::MAX },
+            snapshot_every: v2[2],
         },
+        snapshots: v2[3],
     })
+}
+
+// ------------------------------------------------------------------ post-flop snapshots
+
+const SNAP_MAGIC: &[u8; 4] = b"PLSN";
+
+/// Quantised regret-matching strategy (sum = ~65535) at one infoset.
+#[inline]
+fn quantised_current(st: &Storage, base: u64, n: usize, out: &mut [u32; MAX_A]) {
+    let mut s = [0.0; MAX_A];
+    st.current(base, n, &mut s);
+    for a in 0..n {
+        out[a] = (s[a] * 65_535.0).round() as u32;
+    }
+}
+
+/// Add one snapshot of the post-flop current strategy to the running-sum file at `path`
+/// (u32 per regret slot; preflop slots stay 0). Streams the old file into a new one and
+/// renames, so no table-sized buffer is allocated and a crash leaves the old file intact.
+/// Returns the number of snapshots now in the file.
+pub fn snapshot_add(path: &Path, tree: &Tree, st: &Storage) -> io::Result<u64> {
+    let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
+    let mut old = match File::open(path) {
+        Ok(f) => {
+            let mut r = BufReader::with_capacity(1 << 22, f);
+            let mut b4 = [0u8; 4];
+            let mut b8 = [0u8; 8];
+            r.read_exact(&mut b4)?;
+            if &b4 != SNAP_MAGIC {
+                return Err(bad("bad snapshot magic".into()));
+            }
+            r.read_exact(&mut b8)?;
+            if u64::from_le_bytes(b8) != tree.n_regrets {
+                return Err(bad("snapshot file does not match the tree".into()));
+            }
+            r.read_exact(&mut b8)?;
+            Some((r, u64::from_le_bytes(b8)))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let count = old.as_ref().map_or(0, |o| o.1) + 1;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut w = BufWriter::with_capacity(1 << 22, File::create(&tmp)?);
+        w.write_all(SNAP_MAGIC)?;
+        w.write_all(&tree.n_regrets.to_le_bytes())?;
+        w.write_all(&count.to_le_bytes())?;
+        let mut q = [0u32; MAX_A];
+        let mut inb = [0u8; 4 * MAX_A];
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind != DECISION {
+                continue;
+            }
+            let n = nd.n as usize;
+            let nb = tree.buckets[nd.street as usize] as usize;
+            for b in 0..nb {
+                if nd.street == 0 {
+                    q[..n].iter_mut().for_each(|x| *x = 0);
+                } else {
+                    quantised_current(st, tree.roff[id] + (b * n) as u64, n, &mut q);
+                }
+                if let Some((r, _)) = old.as_mut() {
+                    r.read_exact(&mut inb[..4 * n])?;
+                    for a in 0..n {
+                        q[a] += u32::from_le_bytes([inb[4 * a], inb[4 * a + 1], inb[4 * a + 2], inb[4 * a + 3]]);
+                    }
+                }
+                for &x in &q[..n] {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+        }
+        w.flush()?;
+        w.get_ref().sync_all()?;
+    }
+    drop(old);
+    fs::rename(&tmp, path)?;
+    Ok(count)
+}
+
+/// Load a snapshot-sum file fully (for evaluation). Returns (sums, count).
+pub fn snapshot_load(path: &Path, tree: &Tree) -> io::Result<(Vec<u32>, u64)> {
+    let mut r = BufReader::with_capacity(1 << 22, File::open(path)?);
+    let mut b4 = [0u8; 4];
+    let mut b8 = [0u8; 8];
+    r.read_exact(&mut b4)?;
+    r.read_exact(&mut b8)?;
+    if &b4 != SNAP_MAGIC || u64::from_le_bytes(b8) != tree.n_regrets {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad snapshot file"));
+    }
+    r.read_exact(&mut b8)?;
+    let count = u64::from_le_bytes(b8);
+    let mut sums = vec![0u32; tree.n_regrets as usize];
+    let mut buf = vec![0u8; 1 << 20];
+    for chunk in sums.chunks_mut(1 << 18) {
+        let bytes = &mut buf[..chunk.len() * 4];
+        r.read_exact(bytes)?;
+        for (x, c) in chunk.iter_mut().zip(bytes.chunks_exact(4)) {
+            *x = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        }
+    }
+    Ok((sums, count))
 }
 
 // ------------------------------------------------------------------ metrics
@@ -833,7 +1047,10 @@ mod tests {
             explore_prob: 0.05,
             prune_c: -2_000,
             floor: -3_000,
-            prune_skip_river_and_terminal: false,
+            prune_skip_river_and_terminal: true,
+            discount_base: 0,
+            snapshot_after: u64::MAX,
+            snapshot_every: 0,
         }
     }
 
@@ -880,8 +1097,8 @@ mod tests {
                 let end = next.min(to);
                 tr.run(*t, end, 1, &stop);
                 *t = end;
-                if end % sc.discount_every == 0 && end < sc.lcfr_until {
-                    tr.discount(end / sc.discount_every, 1);
+                if let Some(k) = sc.discount_k(end) {
+                    tr.discount(k, 1);
                 }
             }
         };
@@ -889,7 +1106,7 @@ mod tests {
             step(mid, &mut t);
             let dir = std::env::temp_dir().join(format!("bp_ckpt_{}_{}", std::process::id(), mid));
             let path = dir.join("c.ckpt");
-            let meta = CkptMeta { config: "t".into(), buckets: tree.buckets, iteration: t, seed: 11, elapsed_secs: 0.0, sched: sc.clone() };
+            let meta = CkptMeta { config: "t".into(), buckets: tree.buckets, iteration: t, seed: 11, elapsed_secs: 0.0, sched: sc.clone(), snapshots: 3 };
             save_checkpoint(&path, &meta, &tree, &st).unwrap();
             let st2 = Storage::new(&tree);
             let m2 = load_checkpoint(&path, &tree, &st2).unwrap();
@@ -903,8 +1120,8 @@ mod tests {
                 let end = next.min(iters);
                 tr2.run(t2, end, 1, &stop);
                 t2 = end;
-                if end % sc.discount_every == 0 && end < sc.lcfr_until {
-                    tr2.discount(end / sc.discount_every, 1);
+                if let Some(k) = sc.discount_k(end) {
+                    tr2.discount(k, 1);
                 }
             }
             return (
@@ -971,6 +1188,124 @@ mod tests {
         assert_eq!(st.regrets[0].load(Ordering::Relaxed), 4); // 3.5 -> 4 (half-even)
         assert_eq!(st.regrets[1].load(Ordering::Relaxed), -2); // -2.5 -> -2
         assert_eq!(st.avg[0].load(Ordering::Relaxed), 4); // 4.5 -> 4
+    }
+
+    #[test]
+    fn paper_schedule_boundaries() {
+        // warm-up ended at iteration 1,000; 100 iterations per minute afterwards
+        let s = Schedule::paper_minutes(1_000, 100.0, 10_000, 1.0);
+        assert_eq!(s.discount_every, 1_000); // 10 minutes
+        assert_eq!(s.discount_k(1_000), Some(1)); // T = 10 min, end of warm-up
+        assert_eq!(s.discount_k(2_000), Some(2));
+        assert_eq!(s.discount_k(1_500), None);
+        assert_eq!(s.prune_after, 1_000 + 190 * 100); // 200 min
+        assert_eq!(s.lcfr_until, 1_000 + 390 * 100); // 400 min
+        assert_eq!(s.discount_k(s.lcfr_until), None); // t < LCFR threshold only
+        assert_eq!(s.discount_k(s.lcfr_until - 1_000), Some(39)); // T = 390 min
+        assert_eq!(s.next_discount(0), Some(1_000));
+        assert_eq!(s.next_discount(1_000), Some(2_000));
+        assert_eq!(s.next_discount(s.lcfr_until - 1_000), None);
+        assert_eq!(s.snapshot_after, 1_000 + 790 * 100); // 800 min
+        assert_eq!(s.snapshot_every, 20_000); // 200 min
+        assert!(s.snapshot_due(s.snapshot_after) && s.snapshot_due(s.snapshot_after + 20_000));
+        assert_eq!(s.next_snapshot(s.snapshot_after), Some(s.snapshot_after + 20_000));
+        // old-style schedule (base 0): boundaries at multiples, k = t / every
+        let o = Schedule { discount_base: 0, discount_every: 100, lcfr_until: 1_000, ..s.clone() };
+        assert_eq!(o.discount_k(100), Some(1));
+        assert_eq!(o.discount_k(300), Some(3));
+        assert_eq!(o.next_discount(0), Some(100));
+        assert!(Schedule::warmup(10_000).discount_k(5).is_none());
+    }
+
+    #[test]
+    fn pruning_exception_spares_river_and_terminal_actions() {
+        let (rules, cfg) = small();
+        let abs = StrengthAbstraction { k: 4 };
+        let tree = Tree::build(&rules, &cfg, abs.buckets());
+        // regrets below C only where `select(node, action)` is true
+        let run = |skip: bool, select: &dyn Fn(usize, usize) -> bool| {
+            let st = Storage::new(&tree);
+            for (id, nd) in tree.nodes.iter().enumerate() {
+                if nd.kind != DECISION {
+                    continue;
+                }
+                let n = nd.n as usize;
+                for b in 0..tree.buckets[nd.street as usize] as usize {
+                    for a in 0..n {
+                        if select(id, a) {
+                            st.regrets[tree.roff[id] as usize + b * n + a].store(-1_500_000_000, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            // only the selected regrets are below C; natural regrets never get near -1e9
+            let sc = Schedule {
+                prune_after: 0,
+                explore_prob: 0.0,
+                prune_c: -1_000_000_000,
+                floor: -2_000_000_000,
+                prune_skip_river_and_terminal: skip,
+                ..sched()
+            };
+            let (_, ts) = Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 3 }.run(0, 300, 1, &AtomicBool::new(false));
+            ts
+        };
+        let river = |id: usize, _a: usize| tree.nodes[id].street == 3;
+        let to_terminal = |id: usize, a: usize| tree.nodes[tree.child(id as u32, a) as usize].kind != DECISION;
+        let (r_on, r_off) = (run(true, &river), run(false, &river));
+        assert_eq!(r_on.pruned_actions, 0, "river actions must never be pruned");
+        assert!(r_off.pruned_actions > 0);
+        assert!(r_on.river_reached > 0);
+        let (t_on, t_off) = (run(true, &to_terminal), run(false, &to_terminal));
+        assert_eq!(t_on.pruned_actions, 0, "terminal-leading actions must never be pruned");
+        assert!(t_off.pruned_actions > 0);
+    }
+
+    #[test]
+    fn snapshot_accumulator_sums_quantised_current_strategies() {
+        let (rules, cfg) = small();
+        let abs = StrengthAbstraction { k: 4 };
+        let tree = Tree::build(&rules, &cfg, abs.buckets());
+        let st = Storage::new(&tree);
+        let sc = sched();
+        let tr = Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 4 };
+        tr.run(0, 300, 1, &AtomicBool::new(false));
+        let dir = std::env::temp_dir().join(format!("bp_snap_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snap.bin");
+        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 1);
+        let first: Vec<i32> = st.regrets.iter().map(|x| x.load(Ordering::Relaxed)).collect();
+        tr.run(300, 600, 1, &AtomicBool::new(false));
+        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 2);
+        let (sums, count) = snapshot_load(&path, &tree).unwrap();
+        assert_eq!(count, 2);
+        // check every infoset: sum = q(first) + q(second); preflop slots are 0
+        let snap1 = Storage::new(&tree);
+        for (x, &v) in snap1.regrets.iter().zip(&first) {
+            x.store(v, Ordering::Relaxed);
+        }
+        let mut q1 = [0u32; MAX_A];
+        let mut q2 = [0u32; MAX_A];
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind != DECISION {
+                continue;
+            }
+            let n = nd.n as usize;
+            for b in 0..tree.buckets[nd.street as usize] as usize {
+                let base = tree.roff[id] + (b * n) as u64;
+                for a in 0..n {
+                    let got = sums[base as usize + a];
+                    if nd.street == 0 {
+                        assert_eq!(got, 0);
+                    } else {
+                        quantised_current(&snap1, base, n, &mut q1);
+                        quantised_current(&st, base, n, &mut q2);
+                        assert_eq!(got, q1[a] + q2[a]);
+                    }
+                }
+            }
+        }
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

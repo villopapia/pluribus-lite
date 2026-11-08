@@ -140,7 +140,8 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     let hist = hist.into_inner().unwrap();
     let t_hist = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let cuts = river_cutoffs(&hist, k, 500);
+    // equal-mass cut-offs: exactly k buckets (1-D k-means merged coincident centroids)
+    let cuts = river_cutoffs_equal_mass(&hist, k);
     let t_fit = t1.elapsed().as_secs_f64();
     let mut mass = vec![0u64; cuts.len() + 1];
     for (bi, &w) in hist.iter().enumerate() {
@@ -158,7 +159,7 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     };
     write_abs_file(&path, &h, &payload).expect("write river");
     log.line(format!(
-        "- river: equity histogram over 2,598,960 boards {t_hist:.1}s, 1-D k-means {t_fit:.2}s, {} cut-offs ({} buckets)",
+        "- river: equity histogram over 2,598,960 boards {t_hist:.1}s, equal-mass cut-offs {t_fit:.2}s, {} cut-offs ({} buckets)",
         cuts.len(),
         cuts.len() + 1
     ));
