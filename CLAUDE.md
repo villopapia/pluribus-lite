@@ -19,7 +19,8 @@ original's strength is not a goal.
 
 ## Milestones
 - **M0: data + stats.** Parse the Pluribus hands from `uoftcprg/phh-dataset` into
-  `data/pluribus_decisions.parquet`. Descriptive stats in `docs/m0_stats.md`.
+  `data/pluribus_decisions.parquet`. Descriptive stats in `docs/m0_stats.md`. **Dataset validated**
+  against Science Data File S1: 10,000 / 10,000 hands identical in all fields (`docs/s1_crosscheck.md`).
 - **M1: correctness harness.** CFR and MCCFR (external sampling, linear discounting,
   negative-regret pruning) validated on Kuhn and Leduc, with exploitability computed via
   best response.

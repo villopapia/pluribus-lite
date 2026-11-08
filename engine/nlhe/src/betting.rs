@@ -539,6 +539,39 @@ river.1+ = 1.0");
         let _ = seen.dropped; // min-raise drops are covered by small_sizes_dropped_and_big_sizes_collapse_to_allin
     }
 
+    /// D-ACT-7: with equal starting stacks (Supp p. 4: every hand starts at 100 bb), an all-in
+    /// is always to the common maximum, so after any all-in nobody can raise again; whether a
+    /// short all-in "reopens" betting can therefore never matter. Checked on every node of a
+    /// 3-handed tree with several sizes per depth, including big sizes that become all-ins.
+    #[test]
+    fn no_raise_is_possible_after_an_all_in_with_equal_stacks() {
+        let r = Rules { players: 3, ..Rules::default() };
+        let c = cfg("preflop.0 = 0.5, 2
+preflop.1 = 1, 3
+preflop.2+ = 1
+flop.0 = 0.5, 1
+flop.1+ = 1
+turn.0 = 0.5, 1
+turn.1+ = 1
+river.0 = 0.5, 1
+river.1+ = 1");
+        fn walk(r: &Rules, c: &AbstractionConfig, s: &BState, allin_nodes: &mut u64) {
+            let acts = r.actions(s, c);
+            if s.allin != 0 {
+                *allin_nodes += 1;
+                assert!(!acts.iter().any(|a| matches!(a, Action::RaiseTo(_))), "raise after an all-in: {acts:?}");
+            }
+            for a in acts {
+                if let Next::Decision(n) = r.apply(s, a) {
+                    walk(r, c, &n, allin_nodes)
+                }
+            }
+        }
+        let mut allin_nodes = 0;
+        walk(&r, &c, &r.root(), &mut allin_nodes);
+        assert!(allin_nodes > 1000, "all-in situations must actually occur ({allin_nodes})");
+    }
+
     /// Chip conservation and street-closing invariants on every path of a small tree.
     #[test]
     fn invariants_hold_on_every_path() {

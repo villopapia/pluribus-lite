@@ -3,7 +3,12 @@
 //!
 //! `cargo run --release --bin build_abstraction -- --config nlhe/configs/m2_11g.cfg
 //!  --out ../data/abstraction/m2_11g [--threads 12] [--seed 1] [--fit-boards 1000]
-//!  [--max-iters 30] [--stages river,flop,turn]`
+//!  [--max-iters 30] [--restarts 25] [--stages river,flop,turn]`
+//!
+//! k-means++ is run `--restarts` times per street (default 25, docs/deviations.md D-INFO-1,
+//! following Ganzfried & Sandholm AAAI 2014); the fit with the lowest within-cluster sum of
+//! squared distances is kept. The SSE of restart 0 (= the old single fit) and of the best
+//! restart are logged.
 //!
 //! Each stage writes one checksummed file; a stage whose valid output already exists is
 //! skipped (stage-level resume). Timings and bucket-size statistics go to stdout and are
@@ -27,9 +32,28 @@ struct Args {
     seed: u64,
     fit_boards: usize,
     max_iters: usize,
+    restarts: usize,
     stages: Vec<String>,
     /// "ochs" (default: Johanson 2013 OCHS k-means) or "equity1d" (legacy, for comparison)
     river_method: String,
+}
+
+/// "SSE restart 0 (single fit) X, best of N Y (restart r), -Z%; min/median/max ...".
+fn restart_line(rs: &kmeans::RestartStats) -> String {
+    let mut v = rs.sse.clone();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let best = rs.sse[rs.best];
+    format!(
+        "  - k-means++ restarts {}: within-cluster SSE restart 0 (= single fit) {:.4}, best {:.4} (restart {}), {:+.2}% vs single; min/median/max {:.4} / {:.4} / {:.4}",
+        rs.sse.len(),
+        rs.sse[0],
+        best,
+        rs.best,
+        (best / rs.sse[0] - 1.0) * 100.0,
+        v[0],
+        v[v.len() / 2],
+        v[v.len() - 1]
+    )
 }
 
 fn parse_args() -> Args {
@@ -40,6 +64,7 @@ fn parse_args() -> Args {
         seed: 1,
         fit_boards: 1000,
         max_iters: 30,
+        restarts: 25,
         stages: vec!["river".into(), "flop".into(), "turn".into()],
         river_method: "ochs".into(),
     };
@@ -54,6 +79,7 @@ fn parse_args() -> Args {
             "--seed" => a.seed = val.parse().expect("--seed"),
             "--fit-boards" => a.fit_boards = val.parse().expect("--fit-boards"),
             "--max-iters" => a.max_iters = val.parse().expect("--max-iters"),
+            "--restarts" => a.restarts = val.parse().expect("--restarts"),
             "--stages" => a.stages = val.split(',').map(|s| s.trim().to_string()).collect(),
             "--river-method" => {
                 assert!(val == "ochs" || val == "equity1d", "--river-method ochs|equity1d");
@@ -140,7 +166,7 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     let pts = sample_points::<5, N_CLUSTERS>(&fitb, a.threads, river_feat_dyn);
     let t_feat = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let (km, st) = kmeans::fit(&pts, N_CLUSTERS, k, Metric::L2, a.max_iters, a.seed, a.threads);
+    let (km, st, rs) = kmeans::fit_restarts(&pts, N_CLUSTERS, k, Metric::L2, a.max_iters, a.seed, a.threads, a.restarts);
     let t_fit = t1.elapsed().as_secs_f64();
     drop(pts);
     // bucket sizes on a second, independent board sample (no river table is stored)
@@ -165,6 +191,7 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
         st.mean_dist,
         st.empty_reseeds
     ));
+    log.line(restart_line(&rs));
     log.line(format!("  - bucket sizes on {} independent river boards: {}", evalb.len(), dist_stats(&sizes)));
 }
 
@@ -238,7 +265,7 @@ fn table_stage<const B: usize, const D: usize>(
     let pts = sample_points::<B, D>(&fitb, a.threads, feat);
     let t_feat = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let (km, st) = kmeans::fit(&pts, D, k, Metric::L1, a.max_iters, a.seed, a.threads);
+    let (km, st, rs) = kmeans::fit_restarts(&pts, D, k, Metric::L1, a.max_iters, a.seed, a.threads, a.restarts);
     let t_fit = t1.elapsed().as_secs_f64();
     log.line(format!(
         "- {stage}: hand-strength histograms ({D} bins), EMD k-means; fit sample {} boards / {} points, features {t_feat:.1}s, k-means {t_fit:.1}s ({} iterations, last changed {}, mean EMD {:.3} bins, empty reseeds {})",
@@ -249,6 +276,7 @@ fn table_stage<const B: usize, const D: usize>(
         st.mean_dist,
         st.empty_reseeds
     ));
+    log.line(restart_line(&rs));
     drop(pts);
     let t2 = Instant::now();
     let table = BucketTable::new(entries as usize, k);
@@ -294,8 +322,8 @@ fn main() {
     let t_all = Instant::now();
     let mut log = Log(String::new());
     log.line(format!(
-        "\n## build {} (threads {}, seed {}, fit boards {}, max iters {})\n",
-        cfg.name, a.threads, a.seed, a.fit_boards, a.max_iters
+        "\n## build {} (threads {}, seed {}, fit boards {}, max iters {}, restarts {})\n",
+        cfg.name, a.threads, a.seed, a.fit_boards, a.max_iters, a.restarts
     ));
     for stage in &a.stages {
         match stage.as_str() {

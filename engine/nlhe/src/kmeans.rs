@@ -232,6 +232,69 @@ pub fn fit(points: &[f32], dim: usize, k: usize, metric: Metric, max_iters: usiz
     (km, stats)
 }
 
+/// Within-cluster sum of squared Euclidean distances: every point is assigned to its nearest
+/// centroid under the clustering metric (`KMeans::nearest`), then the squared L2 distance to
+/// that centroid is summed. This is the restart-selection criterion of Ganzfried & Sandholm
+/// (AAAI 2014, ref 27: "lowest within-cluster sum of squares"), used for every street.
+/// Deterministic for any thread count (per-chunk partial sums merged in chunk order).
+pub fn within_sse(points: &[f32], km: &KMeans, threads: usize) -> f64 {
+    let dim = km.dim;
+    let n = points.len() / dim;
+    let n_chunks = n.div_ceil(CHUNK);
+    let parts: Vec<Mutex<f64>> = (0..n_chunks).map(|_| Mutex::new(0.0)).collect();
+    parallel_chunks(n_chunks, threads, 1, |a, b| {
+        for ch in a..b {
+            let mut s = 0f64;
+            for i in ch * CHUNK..((ch + 1) * CHUNK).min(n) {
+                let x = &points[i * dim..(i + 1) * dim];
+                let c = km.centroid(km.nearest(x).0);
+                s += x.iter().zip(c).map(|(p, q)| ((p - q) as f64).powi(2)).sum::<f64>();
+            }
+            *parts[ch].lock().unwrap() = s;
+        }
+    });
+    parts.into_iter().map(|m| m.into_inner().unwrap()).sum()
+}
+
+/// Seed of restart `r`: restart 0 uses `seed` itself (so 1 restart = the old single fit).
+pub fn restart_seed(seed: u64, r: usize) -> u64 {
+    if r == 0 {
+        return seed;
+    }
+    let mut z = seed ^ (r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RestartStats {
+    /// within-cluster SSE of every restart, in restart order
+    pub sse: Vec<f64>,
+    /// index of the kept restart (lowest SSE; ties -> lowest index)
+    pub best: usize,
+}
+
+/// k-means++ with `restarts` independent restarts (seeds `restart_seed(seed, r)`), keeping
+/// the fit with the lowest within-cluster SSE (D-INFO-1, following ref 27's 25 restarts).
+/// Deterministic given `seed` (and independent of `threads`).
+pub fn fit_restarts(points: &[f32], dim: usize, k: usize, metric: Metric, max_iters: usize, seed: u64, threads: usize, restarts: usize) -> (KMeans, FitStats, RestartStats) {
+    assert!(restarts >= 1);
+    let mut best: Option<(KMeans, FitStats)> = None;
+    let mut rs = RestartStats::default();
+    for r in 0..restarts {
+        let (km, st) = fit(points, dim, k, metric, max_iters, restart_seed(seed, r), threads);
+        let e = within_sse(points, &km, threads);
+        if best.is_none() || e < rs.sse[rs.best] {
+            rs.best = r;
+            best = Some((km, st));
+        }
+        rs.sse.push(e);
+    }
+    let (km, st) = best.unwrap();
+    (km, st, rs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +345,30 @@ mod tests {
         let pts = vec![1.0f32, 3.0, 5.0, 7.0];
         let (km, _) = fit(&pts, 2, 1, Metric::L2, 5, 0, 1);
         assert_eq!(km.c, vec![3.0, 5.0]);
+    }
+
+    #[test]
+    fn restarts_are_deterministic_keep_the_lowest_sse_and_reduce_to_one_fit() {
+        let pts = random_points(6_000, 4, 21);
+        for metric in [Metric::L1, Metric::L2] {
+            let (a, sa, ra) = fit_restarts(&pts, 4, 12, metric, 50, 7, 3, 6);
+            let (b, sb, rb) = fit_restarts(&pts, 4, 12, metric, 50, 7, 1, 6); // other thread count
+            assert_eq!((a.c.clone(), sa, ra.clone()), (b.c.clone(), sb, rb), "deterministic given the seed");
+            assert_eq!(ra.sse.len(), 6);
+            let min = ra.sse.iter().cloned().fold(f64::INFINITY, f64::min);
+            assert_eq!(ra.sse[ra.best], min);
+            assert_eq!(ra.best, ra.sse.iter().position(|&x| x == min).unwrap(), "ties -> lowest index");
+            assert!((within_sse(&pts, &a, 2) - min).abs() < 1e-9);
+            // restarts differ (different seeds) ...
+            assert!(ra.sse.iter().any(|&x| x != ra.sse[0]));
+            // ... and 1 restart is exactly the old single fit with the same seed
+            let (one, _, r1) = fit_restarts(&pts, 4, 12, metric, 50, 7, 3, 1);
+            let (old, _) = fit(&pts, 4, 12, metric, 50, 7, 3);
+            assert_eq!(one.c, old.c);
+            assert_eq!(r1.sse[0], ra.sse[0]);
+            // a different seed gives a different result
+            let (_, _, rc) = fit_restarts(&pts, 4, 12, metric, 50, 8, 3, 6);
+            assert_ne!(rc.sse, ra.sse);
+        }
     }
 }

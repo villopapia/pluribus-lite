@@ -75,6 +75,24 @@ B, common random numbers, 6 seat rotations per deal.)**
 - **Size:** at least 200,000 deals × 6 seats per comparison; increase until the standard error
   is below 1/5 of the effect being claimed.
 
+### 2.1 Blueprint progress curve against the final snapshot (the authors' protocol)
+
+Meta's Pluribus announcement shows the blueprint's improvement during training as head-to-head
+performance **against the final snapshot of training, without search** ("Performance is
+measured against the final snapshot of training. We do not use search in these comparisons."
+Meta AI blog, 11 Jul 2019, `docs/sources/meta_ai_blog_pluribus_2019-07-11.md`; evidence level:
+author statement). The same graph marks the point where the blueprint **stopped limping**.
+
+Our version, on the Dell run's checkpoints:
+- **Opponents:** each checkpoint (one seat) against five copies of the final blueprint (preflop
+  φ, post-flop snapshot average), with `h2h`, no search.
+- **Variance:** seat rotation and duplicate deals; AIVAT once it exists (§3).
+- **Plot:** mbb/game against training time in paper minutes.
+- **Second series:** the preflop limp frequency of each checkpoint's strategy, the analogue of
+  the "stops limping" marker.
+- **Cost:** a few minutes per checkpoint. Run after the long run, or on a copy of its checkpoints
+  while it runs at below-normal priority.
+
 ## 3. Variance reduction for any win-rate figure
 
 The paper used AIVAT [44] (Burch et al., AAAI 2018, `docs/papers/Burch2018-AAAI-AIVAT.pdf`),
