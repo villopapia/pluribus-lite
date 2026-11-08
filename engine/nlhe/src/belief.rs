@@ -18,6 +18,8 @@ pub type PolicyFn<'a> = &'a dyn Fn(u32, usize, &mut [f64; MAX_A]);
 
 pub struct Beliefs {
     pub ranges: Vec<Vec<f64>>,
+    /// observations σ gave probability 0 (prior kept, D-SRCH-2); logged by the search
+    pub zero_prob_events: u64,
 }
 
 /// 1 for combos that share no card with `cards`, else 0.
@@ -28,13 +30,15 @@ pub fn live_mask(cards: &[u8]) -> Vec<f64> {
 impl Beliefs {
     /// 1/1326 for every combo of every player.
     pub fn uniform(players: usize) -> Self {
-        Beliefs { ranges: vec![vec![1.0 / COMBOS as f64; COMBOS]; players] }
+        Beliefs { ranges: vec![vec![1.0 / COMBOS as f64; COMBOS]; players], zero_prob_events: 0 }
     }
 
     /// Bayes update of player `p`'s range for an observed action; `lik[c]` = σ(action | combo c).
     /// Returns the probability of the observation (0: impossible under σ, prior kept, D-SRCH-2).
     pub fn observe_action(&mut self, p: usize, lik: &[f64]) -> f64 {
-        bayes(&mut self.ranges[p], lik)
+        let z = bayes(&mut self.ranges[p], lik);
+        self.zero_prob_events += (z == 0.0) as u64;
+        z
     }
 
     /// Public cards: every combo holding one of them becomes impossible, for every player.
@@ -209,5 +213,9 @@ mod tests {
             assert!((bel.ranges[2][c] - lik[c] / 1326.0 / z).abs() < 1e-15);
         }
         assert_eq!(bel.ranges[0], vec![1.0 / 1326.0; 1326]); // other players unchanged
+        // an observation σ rules out for every hand: prior kept, event counted (D-SRCH-2)
+        let before = bel.ranges[1].clone();
+        assert_eq!(bel.observe_action(1, &vec![0.0; 1326]), 0.0);
+        assert_eq!((bel.zero_prob_events, &bel.ranges[1]), (1, &before));
     }
 }

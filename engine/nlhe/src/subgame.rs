@@ -10,9 +10,10 @@
 //! * otherwise the subgame runs to the end of the game; a street change is then a `Chance` node
 //!   with one child, where the solver deals the next card(s).
 //!
-//! Raise sizes come from the search's own `AbstractionConfig` (D-SRCH-3).
+//! Raise sizes come from the search's own configs (D-SRCH-3): one for the root's street, a coarser
+//! one for the streets after it (`build_with`).
 
-use crate::betting::{Action, BState, Next, Rules};
+use crate::betting::{Action, BState, Next, Rules, MAX_PLAYERS};
 use crate::config::AbstractionConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +47,24 @@ impl LeafRule {
     }
 }
 
+/// Betting state at the start of post-flop `street` with each seat's total contribution and the
+/// folded seats (as after the previous round closed).
+pub fn round_start(rules: &Rules, street: u8, total: [u32; MAX_PLAYERS], folded: u8) -> BState {
+    assert!((1..=3).contains(&street));
+    let all = ((1u16 << rules.players) - 1) as u8;
+    let allin = (0..rules.players).filter(|&p| total[p] == rules.stack).fold(0u8, |m, p| m | 1 << p) & !folded;
+    let need = all & !folded & !allin;
+    let first = if rules.players == 2 { 1 } else { 0 };
+    let to_act = (0..rules.players).map(|k| (first + k) % rules.players).find(|&q| need & (1 << q) != 0).expect("nobody can act");
+    BState { street, to_act: to_act as u8, folded, allin, need, raises: 0, last_inc: rules.bb, total, street_bet: [0; MAX_PLAYERS] }
+}
+
+/// Action sequences in a subgame: (history, action) pairs over its decision nodes, players'
+/// actions only (Supp p. 13; the blueprint's 664,845,654 uses the same unit).
+pub fn action_sequences(g: &Subgame) -> u64 {
+    g.nodes.iter().filter(|n| n.kind == Kind::Decision).map(|n| n.n as u64).sum()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SNode {
     pub kind: Kind,
@@ -57,36 +76,52 @@ pub struct SNode {
 
 pub struct Subgame {
     pub rule: LeafRule,
+    pub root_street: u8,
     pub nodes: Vec<SNode>,
     pub children: Vec<u32>,
     /// action on each edge, parallel to `children` (`None` for the edge out of a chance node)
     pub edges: Vec<Option<Action>>,
+    /// set when `build_capped` stopped expanding at its node cap (the tree is then incomplete)
+    pub truncated: bool,
+    cap: usize,
 }
 
 impl Subgame {
+    /// One size config for every street of the subgame.
     pub fn build(rules: &Rules, cfg: &AbstractionConfig, root: BState) -> Subgame {
+        Self::build_with(rules, cfg, cfg, root, usize::MAX)
+    }
+
+    /// `root_cfg` sizes on the root's street, `later_cfg` on the streets after it (D-SRCH-3);
+    /// stops expanding once `cap` nodes exist (`truncated`; for size measurements only).
+    pub fn build_with(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize) -> Subgame {
         if root.street == 0 {
             assert_eq!(root, rules.root(), "a preflop subgame starts at the start of the hand");
         } else {
             assert!(root.raises == 0 && root.street_bet.iter().all(|&b| b == 0), "the root must be the start of a round");
         }
-        let mut g = Subgame { rule: LeafRule::for_root(rules, &root), nodes: Vec::new(), children: Vec::new(), edges: Vec::new() };
-        g.add(rules, cfg, root, Kind::Decision);
+        let rule = LeafRule::for_root(rules, &root);
+        let mut g = Subgame { rule, root_street: root.street, nodes: Vec::new(), children: Vec::new(), edges: Vec::new(), truncated: false, cap };
+        g.add(rules, [root_cfg, later_cfg], root, Kind::Decision);
         g
     }
 
-    fn add(&mut self, rules: &Rules, cfg: &AbstractionConfig, s: BState, kind: Kind) -> u32 {
+    fn add(&mut self, rules: &Rules, cfgs: [&AbstractionConfig; 2], s: BState, kind: Kind) -> u32 {
         let id = self.nodes.len() as u32;
         self.nodes.push(SNode { kind, state: s, first: 0, n: 0 });
+        if self.nodes.len() >= self.cap {
+            self.truncated = true;
+            return id;
+        }
         let kids: Vec<(Option<Action>, u32)> = match kind {
             Kind::Decision => rules
-                .actions(&s, cfg)
+                .actions(&s, cfgs[(s.street != self.root_street) as usize])
                 .into_iter()
                 .map(|a| {
                     let child = match rules.apply(&s, a) {
                         Next::Terminal(n) => {
                             let k = if rules.n_in_hand(&n) == 1 { Kind::FoldEnd } else { Kind::Showdown };
-                            self.add(rules, cfg, n, k)
+                            self.add(rules, cfgs, n, k)
                         }
                         Next::Decision(n) => {
                             let new_street = n.street > s.street;
@@ -102,13 +137,13 @@ impl Subgame {
                             } else {
                                 Kind::Decision
                             };
-                            self.add(rules, cfg, n, k)
+                            self.add(rules, cfgs, n, k)
                         }
                     };
                     (Some(a), child)
                 })
                 .collect(),
-            Kind::Chance => vec![(None, self.add(rules, cfg, s, Kind::Decision))],
+            Kind::Chance => vec![(None, self.add(rules, cfgs, s, Kind::Decision))],
             _ => vec![],
         };
         let first = self.children.len() as u32;
@@ -236,6 +271,26 @@ mod tests {
         let after = g.child(bet, 2); // next player: [fold, call, 1 pot, all-in]
         assert!(matches!(g.action(bet, 2), Some(RaiseTo(_))));
         assert_eq!(g.nodes[after as usize].kind, Kind::Leaf);
+    }
+
+    #[test]
+    fn later_streets_use_the_later_config() {
+        let r = Rules { players: 2, ..Rules::default() };
+        let root = play(&r, &[Call, Call, Call, Call]); // heads-up turn
+        let (rc, lc) = (cfg(CFG), cfg("allin = true\nriver.0 =\nriver.1+ ="));
+        let g = Subgame::build_with(&r, &rc, &lc, root, usize::MAX);
+        for n in g.nodes.iter().filter(|n| n.kind == Kind::Decision) {
+            let want = r.actions(&n.state, if n.state.street == 2 { &rc } else { &lc });
+            let got: Vec<Action> = (0..n.n as usize).map(|i| g.edges[n.first as usize + i].unwrap()).collect();
+            assert_eq!(got, want);
+            if n.state.street == 3 {
+                // river: check/call/fold or all-in only
+                assert!(got.iter().all(|a| !matches!(a, RaiseTo(t) if *t < n.state.street_bet[n.state.to_act as usize] + r.stack - n.state.total[n.state.to_act as usize])));
+            }
+        }
+        assert!(action_sequences(&g) < action_sequences(&Subgame::build(&r, &rc, root)));
+        // a cap truncates and flags the tree
+        assert!(Subgame::build_with(&r, &rc, &rc, root, 10).truncated);
     }
 
     #[test]

@@ -159,7 +159,8 @@ node** (University of Sheffield HPC, ~1 TB of RAM; 2 TB nodes also exist).
 | current round | **lossless** information abstraction | 13, 22 |
 | later rounds | **500 buckets per round** | 13, 22 |
 | bucketing | determined **separately for each flop**, potential-aware abstraction [48] with EMD clustering [27], per [28] | 13–14 |
-| raise sizes in search | **1 to 6** (p. 12); "typically no more than five" (p. 22) | 12, 22 |
+| raise sizes in search | **1 to 6** (pp. 12–13); "typically no more than five" (p. 22) | 12–13, 22 |
+| subgame size | **100 to 2,000 action sequences** in the subgame action abstraction, "considering only players' actions, not chance's actions" (sets not published) | 13 |
 | off-tree opponent action | added as a valid action to the subgame model and **the subgame is searched again from the root** (typically the start of the betting round); the root does not change until a new round | 22 |
 | freezing | freeze action probabilities **only for actions Pluribus chose** in the subgame, **only for its actual hand**; opponent probabilities are not frozen; when a round ends the root moves to the new round, freezing everything before it | 23 |
 

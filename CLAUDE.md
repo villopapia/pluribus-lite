@@ -83,6 +83,8 @@ Set up 2026-11-08: j63 rebuilt here is byte-identical to the Dell's (`docs/j63_h
   use `py -3.13` or the venv). Venv pinned by `analysis/requirements.lock`.
 
 ### Both
+- Python patch levels differ: **Dell 3.13.1, MSI 3.13.17**. The venv packages are identical on
+  both (`analysis/requirements.lock`, Dell `pip freeze` verified 2026-11-08).
 - The `python3` command is the Microsoft Store stub, so don't use it.
 - Rust: rustup with `stable-x86_64-pc-windows-gnu` (rustc 1.99.1), user-local in
   `~/.cargo` and `~/.rustup`. **PATH was not modified**, so call

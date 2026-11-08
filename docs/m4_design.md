@@ -103,6 +103,58 @@ preflop decision count, and the leaves equal its preflop→flop edges. Flop root
 leaf is either a turn start or right after the 2nd raise; no flop decision has ≥ 2 raises. Flop
 and turn roots heads-up: no leaves, decision count equals an independent enumeration to the end.
 
+### 2.1 Search raise sizes: calibration to 100–2,000 action sequences (D-SRCH-3)
+
+**Paper.** "During real-time search, the number of action sequences (considering only players'
+actions, not chance's actions) in the subgame action abstraction is between 100 and 2,000"
+(Supp p. 13); "between one and six" raise sizes (pp. 12–13), "typically no more than five"
+(p. 22). The sets are not published.
+
+**Unit.** Action sequences = (history, action) pairs over the subgame's decision nodes, the unit
+of the blueprint's 664,845,654 (`subgame::action_sequences`). Leaf continuation choices are not
+counted (they are not betting actions).
+
+**Roots.** Every round start Pluribus searched from in the 10,000 logged hands where it was still
+in the hand and ≥ 2 players could act (`analysis/subgame_roots.py` → `data/subgame_roots.tsv`):
+4,041 roots (flop 1,576 / 271 / 21 with 2 / 3 / 4 players; turn 1,137 / 144 / 11; river
+813 / 64 / 4). No post-flop root had more than 4 players.
+
+**Method** (`analysis/calibrate_search.py`, the analogue of θ against 664.8M):
+1. Evidence: Pluribus' logged post-flop sizes came from search (p. 19). Rank grid sizes per
+   (street, raise depth) by usage (non all-in).
+2. Root street: top-k per (street, heads-up/multiway, depth 0/1), k = 1..5, + all-in (≤ 6 raise
+   sizes); depth ≥ 2: {1×} + all-in. Later streets of the subgame: top-k_l for the first bet,
+   k_l = 0..3, raises all-in only.
+3. For each cell, maximise the share of its roots in [100, 2,000]; ties → median closest to
+   √(100·2,000) on a log scale → fewer later sizes. Order river → turn → flop, heads-up first.
+
+**Why two configs.** With one set per street the heads-up river needs ~5 sizes to reach 100
+sequences (median 68 with the blueprint's sizes), and the same river inside every turn subgame
+then pushes multiway turns to a median of 8,724 even with one size everywhere. The calibration
+chose all-in only on every later street (k_l = 0).
+
+**Result** (`engine/nlhe/configs/search_root.cfg`, `search_later.cfg`; `subgame_sizes`):
+
+| street | players | roots | median | in [100, 2,000] | blueprint sizes (faithful.cfg): median / in range |
+|---|---|---:|---:|---:|---|
+| flop | 2 | 1,576 | 508 | 100.0% | 4,404 / 17.4% |
+| flop | 3 | 271 | 261 | 100.0% | 120 / 98.2% |
+| flop | 4 | 21 | 808 | 100.0% | 352 / 100% |
+| turn | 2 | 1,137 | 464 | 98.3% | 544 / 96.6% |
+| turn | 3 | 144 | 1,560 | 99.3% | 8,214 / 1.4% |
+| turn | 4 | 11 | 17,872 | 0.0% | 51,160 / 0% |
+| river | 2 | 813 | 404 | 90.3% | 68 / 2.1% |
+| river | 3 | 64 | 726 | 100.0% | 942 / 100% |
+| river | 4 | 4 | 6,520 | 25.0% | 5,296 / 25% |
+| **all post-flop** | | **4,041** | **488** | **97.2%** | 616 / 43.1% |
+| preflop (start, 6 players) | 6 | 1 | 245,817 | no | 19,095,525 |
+
+Sizes chosen (pot fractions, + all-in): flop HU {0.5, 1} / {0.5, 1}; flop MW {0.25, 0.5, 1, 2} /
+{0.5, 0.75, 1, 2}; turn HU {0.25, 0.5, 1, 1.5, 2} / {0.5}; turn MW {0.5} / {0.5}; river HU
+{0.5, 0.75, 1, 1.5, 2} / {0.5, 0.75, 1, 1.5, 2}; river MW {0.5} / {0.5} (depth 0 / depth 1).
+Open: 4-way turns stay above 2,000 even at the minimum; the preflop subgame (stage 6) needs a
+further restriction that the paper does not describe.
+
 ## 3. Leaves: continuation strategies (stage 3)
 
 **Paper (pp. 23–24).** At a leaf, "each player still in the hand simultaneously chooses one of
