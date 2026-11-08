@@ -23,6 +23,7 @@ page range.
 | ref | verified title | file | source URL | SHA-256 (first 16) | level |
 |---|---|---|---|---|---|
 | — (Libratus) | Brown & Sandholm, *Superhuman AI for heads-up no-limit poker: Libratus beats top professionals*, Science 359:418–424 (2018) | `Brown2018-Science-Libratus.pdf` | noambrown.github.io/papers/17-Science-Superhuman.pdf | 7c8dc72bf3d6953b | cited method (predecessor) |
+| — (Libratus Supp) | Brown & Sandholm, *Supplementary Materials for Superhuman AI for heads-up no-limit poker: Libratus beats top professionals*, Science, DOI 10.1126/science.aao1733 (the DOI is printed in the Libratus paper) | `Brown2018-Science-Libratus_Supp.pdf` (38 pages) | science.org/doi/suppl/10.1126/science.aao1733/suppl_file/aao1733_brown_sm.pdf (downloaded by the user, 2026-11-08) | fc42e46153fe89ee | cited method (predecessor) |
 | 23 | Gibson, *Regret Minimization in Games and the Development of Champion Multiplayer Computer Poker-Playing Agents*, PhD thesis, U. Alberta 2014 | `Gibson2014-PhD-thesis.pdf` | ualberta.scholaris.ca/bitstreams/c770eae9-e78d-4c17-91f1-d71076c244ab/download | 30fdddc7d9bc3ab7 | cited method |
 | 27 | Ganzfried & Sandholm, *Potential-Aware Imperfect-Recall Abstraction with Earth Mover's Distance in Imperfect-Information Games*, AAAI 2014, pp. 682–690 | `Ganzfried2014-AAAI-potential-aware-EMD.pdf` | cs.cmu.edu/~sandholm/potential-aware_imperfect-recall.aaai14.pdf | 27b87c8d0bf4be8e | cited method |
 | 33 | Brown & Sandholm, *Baby Tartanian8: Winning Agent from the 2016 Annual Computer Poker Competition*, IJCAI-16, pp. 4238–4239 | `Brown2016-IJCAI-baby-tartanian8.pdf` | ijcai.org/Proceedings/16/Papers/639.pdf | 7b8cb9286993819c | cited method |
@@ -42,11 +43,36 @@ page range.
 
 | item | why | title as known |
 |---|---|---|
-| Libratus supplementary materials (Science, DOI 10.1126/science.aao1733) | only on science.org (Cloudflare); no author copy found | — |
 | ref 30, Jackson 2013 | no PDF found online (AAAI workshop proceedings) | *Slumbot NL: Solving Large Games with Counterfactual Regret Minimization Using Sampling and Distributed Processing* (**unverified**, from memory of the literature) |
 | ref 32, Jackson 2016: **cited for snapshot averaging** | aitopics.org has only the abstract | *Compact CFR* (title and abstract verified on aitopics.org: regret matching replaced by "follow-the-leader", regrets quantised to 1 byte, 1/16 of the memory) |
 | ref 34, Jackson 2017 | aitopics.org has only the abstract | *Targeted CFR* (a sampling variant of CFR) |
 | AMA, r/MachineLearning, 17–19 Jul 2019 (thread `ceece3`) | the fetch tool refuses reddit.com; the one mirror returned HTTP 502 | *AMA: We are Noam Brown and Tuomas Sandholm, creators of the Carnegie Mellon / Facebook multiplayer poker bot Pluribus* |
+
+### What the Libratus supplement adds (read in full, 2026-11-08)
+
+- **No bet-size sets and no card-abstraction details** are published in it either. Size choice:
+  sizes come from analysing ACPC agents and from parameter optimisation (main paper); overnight
+  "self-improvement" adds the most common opponent sizes, or gap-filling ones, scored by
+  min{x − A, B − x}.
+- **Pruning (its Algorithm 1)** differs from Pluribus':
+  - after T₀ iterations, *each* traverser action with regret below C is sampled with probability
+    K / (K + C − R), with a floor of 2% on the chained sampling probability;
+  - sampled actions update φ with weight 1/p;
+  - there are **no exceptions** for the final round or for terminal actions.
+
+  Pluribus' rule (95% / 5% per iteration, exceptions for the final round and terminal actions)
+  is a different, simpler variant. The Libratus text therefore gives **no evidence on how to
+  read Pluribus' exceptions** (D-ALG-9).
+- **φ in Libratus:** it is incremented at **opponent** nodes on every iteration, from t = 1, on
+  all rounds (standard external sampling). Pluribus changed this to a sampled traverser update
+  every 10,000 iterations, round 1 only (Alg. 1). This confirms that Pluribus' φ rule is a
+  deliberate change, not an inherited default.
+- **Search (lineage only, for M4):**
+  - CFR+ with 1,000 iterations if at most $1,600 is in the pot, otherwise 1,900;
+  - all bet sizes randomly scaled by 0–8% per hand (footnote 49);
+  - perfect-recall abstraction in subgames.
+- **Hardware:** 196 nodes for the blueprint; only 14 of 28 cores used per node ("bottlenecked
+  primarily by memory access"); about 3M core hours for the blueprints.
 
 ## 2. Technical details from author statements that are not in the supplement
 
@@ -69,7 +95,7 @@ budgets or the solver-switch threshold.
 
 | item | what the new sources say | level | recommendation |
 |---|---|---|---|
-| **D-ACT-1 / 2 / 3** (preflop/flop size sets, depths without evidence) | **Baby Tartanian8**: "Actions were selected by examining the equilibrium strategies of smaller agents and choosing the actions that were most commonly used." **Libratus**: sizes were "nice fractions or multiples of the pot [roughly determined by analyzing the most common bet sizes … taken by prior top AIs in the ACPC]"; a few early sizes came from a parameter-optimisation algorithm (Brown & Sandholm AAAI 2014, not fetched). Neither gives actual sets; the Libratus supplement may (not retrieved). | cited method | **Keep the method** (frequent sizes on a round-fraction grid, calibrated to the tree size). It matches the lineage's stated practice, and D-ACT-5 shows Pluribus' raises sit on round fractions. Optional, low priority: fetch the Libratus supplement (manual) and compare its sets with ours as a sanity check. No change now. |
+| **D-ACT-1 / 2 / 3** (preflop/flop size sets, depths without evidence) | The **Libratus supplement** (now read) publishes no sets either. **Baby Tartanian8**: "Actions were selected by examining the equilibrium strategies of smaller agents and choosing the actions that were most commonly used." **Libratus**: sizes were "nice fractions or multiples of the pot [roughly determined by analyzing the most common bet sizes … taken by prior top AIs in the ACPC]"; a few early sizes came from a parameter-optimisation algorithm (Brown & Sandholm AAAI 2014, not fetched). Neither gives actual sets; the Libratus supplement may (not retrieved). | cited method | **Keep the method** (frequent sizes on a round-fraction grid, calibrated to the tree size). It matches the lineage's stated practice, and D-ACT-5 shows Pluribus' raises sit on round fractions. No change. |
 | **D-ACT-6** (abstract size below the min-raise: dropped, not clamped) | nothing in any source | — | Keep "dropped" (a clamped size would duplicate the min-raise or another size). No change. |
 | **D-ACT-7** (a short all-in reopens betting) | Nothing in the sources. **Our inference:** every hand starts with equal 10,000 stacks (Supp p. 4), so any all-in is to the common maximum; no player can re-raise above it, and reopening can never be used. | our inference (logical) | **Close as "no effect"** after one confirming test (on the faithful tree, no raise follows an all-in). Code change: a test only. |
 | **D-ACT-8** (limping allowed) | the Meta blog: the blueprint learned to stop limping during training | author statement | Supports the current `limp = all`. Upgrade the evidence in the ledger; no code change. |
@@ -79,7 +105,7 @@ budgets or the solver-switch threshold.
 | **D-SCHED-1** (paper minute as a fraction of the planned run) | nothing new (Meta repeats 8 days, 64 cores) | — | Keep. |
 | **D-ALG-5** (φ from t = 0; ablation at 800) | **Gibson thesis** (ref 23), multiplayer CFR (Alg., lines 32–34): the cumulative profile is updated only with probability p on some iterations, a precursor of Pluribus' strategy interval; nothing on a start time | cited method | Keep the ruling. Run the planned ablation (0 vs 800) when there is a reduced config to spare. No change. |
 | **D-ALG-6** (post-flop snapshots: uniform average, missing = uniform) | The paper cites **Jackson 2016 (Compact CFR) [32]** for averaging snapshots; its full text is not retrieved, and the abstract does not mention averaging weights. **Gibson thesis**: in 3-player limit hold'em, the **current** profile reached better performance than the average (5 vs 20 days, Fig. 4.7b), which supports averaging current-strategy snapshots after the flop. | cited method (partly unread) | Keep uniform averaging. **Retrieve Compact CFR manually**: if it weights snapshots (e.g. linearly), we should match it. No change until then. |
-| **D-ALG-9** (pruning exceptions) | Pruning lineage: Regret-Based Pruning (NIPS 2015) skips an action only until its regret could turn positive; **Baby Tartanian8** (ref 33) used a sampled RBP variant, "turned off RBS for the final 5 days" because of "some evidence that our implementation … may have led to decreased performance when closer to convergence". No source discusses fold or run-out exemptions. Jackson 2017 (Targeted CFR, ref 34) is not retrieved. | cited method | Keep the 2026-11-08 ruling. Watch `pruned_rate` and convergence late in the run. The Baby Tartanian8 note is a reason to keep the 5% unpruned iterations exactly as in the paper. No change. |
+| **D-ALG-9** (pruning exceptions) | Pruning lineage: Regret-Based Pruning (NIPS 2015) skips an action only until its regret could turn positive; **Baby Tartanian8** (ref 33) used a sampled RBP variant, "turned off RBS for the final 5 days" because of "some evidence that our implementation … may have led to decreased performance when closer to convergence". No source discusses fold or run-out exemptions. The **Libratus supplement's** pruning is per-action probabilistic (K / (K + C − R), 2% floor) with **no** exceptions, so Pluribus' exception rule is its own and the lineage cannot settle our reading. Jackson 2017 (Targeted CFR, ref 34) is not retrieved. | cited method | Keep the 2026-11-08 ruling. Watch `pruned_rate` and convergence late in the run. The Baby Tartanian8 note is a reason to keep the 5% unpruned iterations exactly as in the paper. No change. |
 | **D-ALG-10** (parallelism: lock-free threads) | Baby Tartanian8 / Tartanian7: distributed MCCFR, flop-conditioned partitions; Pluribus used one shared-memory node (paper) | cited method | No change (shared memory matches the paper's hardware). |
 | **D-RES-4** (63 buckets on the Dell) | — | — | No change. |
 | **D-INFO-6 / M4 search** (pending) | **Johanson 2011** (ref 42): the vector-based traversal ("public chance sampling": sample public cards, carry vectors over all private hands) is the CFR form Pluribus' search uses with one board sample per thread. **Brown & Sandholm 2017** (ref 52): nested subgame solving and its action-translation handling. **Ganzfried & Sandholm 2015** (ref 49): unsafe "endgame solving", the variant Pluribus adopts | cited method | Fold into the M4 design. Write `docs/m4_design.md` from these before coding M4. No change now. |
@@ -93,6 +119,6 @@ budgets or the solver-switch threshold.
    the item. *Test only.*
 3. **D-ACT-8, D-INFO-5:** upgrade the evidence in the ledger. *Docs only.*
 4. **Eval plan:** add the Meta-style blueprint progress curve. *Docs only.*
-5. **Manual downloads needed:** Libratus supplement; Jackson 2013 / 2016 / 2017 (2016 is the
+5. **Manual downloads needed:** Jackson 2013 / 2016 / 2017 (2016 is the
    most important: it is cited for snapshot averaging, D-ALG-6); the Reddit AMA thread (save the
    page as HTML or PDF into `docs/sources/`).
