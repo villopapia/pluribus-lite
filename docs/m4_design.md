@@ -130,30 +130,48 @@ in the hand and ≥ 2 players could act (`analysis/subgame_roots.py` → `data/s
 
 **Why two configs.** With one set per street the heads-up river needs ~5 sizes to reach 100
 sequences (median 68 with the blueprint's sizes), and the same river inside every turn subgame
-then pushes multiway turns to a median of 8,724 even with one size everywhere. The calibration
-chose all-in only on every later street (k_l = 0).
+then pushes multiway turns to a median of 8,724 even with one size everywhere. So the subgame's
+later streets get their own, coarser set.
 
-**Result** (`engine/nlhe/configs/search_root.cfg`, `search_later.cfg`; `subgame_sizes`):
+**Later-street alternatives** (each with the current-street sizes re-calibrated; all-in is always
+available). First calibration (2026-11-08 morning): all-in only. Ruling 2026-11-08: too strong a
+restriction, find alternatives in range:
+
+| later streets | post-flop roots in range | median | current-street sizes (depth 0 / 1), heads-up flop · turn |
+|---|---:|---:|---|
+| all-in only | 97.2% | 488 | {0.5, 1} / {0.5, 1} · {0.25, 0.5, 1, 1.5, 2} / {0.5} |
+| pot first bet, raises all-in | 94.0% | 504 | {0.5} / {0.5} · {0.25, 0.5} / {0.5, 1} |
+| pot throughout | 94.0% | 608 | {0.5} / {0.5} · {0.25, 0.5} / {0.5, 1} |
+| ½ pot or pot first bet, raises all-in | 93.9% | 552 | {0.5} / {0.5} · {0.25, 0.5} / {0.5} |
+| **pot first bet heads-up, all-in only multiway** (`pot_bet_hu`) | **97.2%** | **504** | {0.5} / {0.5} · {0.25, 0.5} / {0.5, 1} |
+
+The three uniform pot variants fail only on 3–4-way turns (7.7% / 7.7% / 5.2% in range, medians
+2,652–3,720), whose river is multiway. **Recommendation: `pot_bet_hu`** (now in
+`configs/search_root.cfg` + `search_later.cfg`): the same coverage as all-in only, and every
+heads-up subgame (87% of the real roots) keeps a pot-sized bet on later streets, so a turn search
+does not model river play as check-or-shove. The price is fewer current-street sizes heads-up
+(flop {0.5} + all-in instead of {0.5, 1} + all-in; turn {0.25, 0.5} instead of five sizes).
+
+**Result** with `pot_bet_hu` (`subgame_sizes`):
 
 | street | players | roots | median | in [100, 2,000] | blueprint sizes (faithful.cfg): median / in range |
 |---|---|---:|---:|---:|---|
-| flop | 2 | 1,576 | 508 | 100.0% | 4,404 / 17.4% |
-| flop | 3 | 271 | 261 | 100.0% | 120 / 98.2% |
-| flop | 4 | 21 | 808 | 100.0% | 352 / 100% |
-| turn | 2 | 1,137 | 464 | 98.3% | 544 / 96.6% |
-| turn | 3 | 144 | 1,560 | 99.3% | 8,214 / 1.4% |
-| turn | 4 | 11 | 17,872 | 0.0% | 51,160 / 0% |
+| flop | 2 | 1,576 | 600 | 100.0% | 4,404 / 17.4% |
+| flop | 3 | 271 | 249 | 100.0% | 120 / 98.2% |
+| flop | 4 | 21 | 792 | 100.0% | 352 / 100% |
+| turn | 2 | 1,137 | 452 | 98.3% | 544 / 96.6% |
+| turn | 3 | 144 | 1,932 | 99.3% | 8,214 / 1.4% |
+| turn | 4 | 11 | 18,944 | 0.0% | 51,160 / 0% |
 | river | 2 | 813 | 404 | 90.3% | 68 / 2.1% |
 | river | 3 | 64 | 726 | 100.0% | 942 / 100% |
 | river | 4 | 4 | 6,520 | 25.0% | 5,296 / 25% |
-| **all post-flop** | | **4,041** | **488** | **97.2%** | 616 / 43.1% |
-| preflop (start, 6 players) | 6 | 1 | 245,817 | no | 19,095,525 |
+| **all post-flop** | | **4,041** | **504** | **97.2%** | 616 / 43.1% |
 
-Sizes chosen (pot fractions, + all-in): flop HU {0.5, 1} / {0.5, 1}; flop MW {0.25, 0.5, 1, 2} /
-{0.5, 0.75, 1, 2}; turn HU {0.25, 0.5, 1, 1.5, 2} / {0.5}; turn MW {0.5} / {0.5}; river HU
-{0.5, 0.75, 1, 1.5, 2} / {0.5, 0.75, 1, 1.5, 2}; river MW {0.5} / {0.5} (depth 0 / depth 1).
-Open: 4-way turns stay above 2,000 even at the minimum; the preflop subgame (stage 6) needs a
-further restriction that the paper does not describe.
+Sizes (pot fractions, + all-in), depth 0 / depth 1: flop HU {0.5} / {0.5}; flop MW
+{0.25, 0.5, 1, 2} / {0.5, 0.75, 1, 2}; turn HU {0.25, 0.5} / {0.5, 1}; turn MW {0.5} / {0.5}; river
+HU {0.5, 0.75, 1, 1.5, 2} / {0.5, 0.75, 1, 1.5, 2}; river MW {0.5} / {0.5}; depth ≥ 2 {1}. Later
+streets: heads-up {1} for the first bet, all-in for raises; multiway all-in only. Open: 4-way
+turns stay above 2,000 even at the minimum (11 roots). Preflop: §2.2.
 
 ## 3. Leaves: continuation strategies (stage 3)
 
