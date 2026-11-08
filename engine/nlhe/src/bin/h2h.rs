@@ -26,7 +26,7 @@ fn main() {
     let seed: u64 = get("--seed").map(|x| x.parse().unwrap()).unwrap_or(1);
 
     let abs = TableAbstraction::load(&abs_dir, buckets).expect("abstraction");
-    let tree = Tree::build(&Rules::default(), &cfg, abs.buckets());
+    let tree = Tree::build(&Rules { players: cfg.players, ..Rules::default() }, &cfg, abs.buckets());
     let a = Storage::new(&tree);
     let b = Storage::new(&tree);
     let ma = load_checkpoint(&pa, &tree, &a).expect("load A");

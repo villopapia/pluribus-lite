@@ -205,7 +205,7 @@ fn main() {
     } else {
         println!("river: on the fly (OCHS + nearest centroid)");
     }
-    let tree = Tree::build(&Rules::default(), &cfg, abs.buckets());
+    let tree = Tree::build(&Rules { players: cfg.players, ..Rules::default() }, &cfg, abs.buckets());
     let mut st = Storage::new(&tree);
     println!(
         "setup {:.1}s: {} nodes ({} decision), {} regret slots if dense ({:.2} GiB), {} preflop slots allocated, {} avg counts ({:.2} GiB), buckets {:?}, threads {}",

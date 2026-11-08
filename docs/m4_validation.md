@@ -7,10 +7,25 @@ Values are chips per hand (Leduc ante 1). Exploitability = (BR₀ + BR₁) / 2 o
 strategy against an exact best response (`cfr::br`); the agent's strategy is tabulated by
 replaying Algorithm 2 along every infoset's public history (`cfr::nested::agent_policy`).
 
+## Status: Leduc = boundary-condition study (ruling 2026-11-08)
+
+Criterion (a) below was badly framed for Leduc and is **superseded**. The paper itself says that
+unsafe search has no exploitability guarantee (Supp p. 20), that playing the final iteration may
+increase exploitability (p. 22), and that compression relies on abstract infosets rarely recurring
+(p. 24); Leduc breaks all three conditions (a 4–6-outcome chance node before the root, 288
+recurring infosets, an exact best responder). This run therefore measures *where the method's
+assumptions stop holding*, not whether Pluribus' search works. The **3 of 8 positive cells** for
+(a) (exact continuations, average play; below) are: MCCFR-2k blueprint, agent C (0.314 vs 0.400);
+abstracted blueprint, agent A (0.447 vs 0.548); abstracted blueprint, agent C (0.536 vs 0.548).
+
+The replacement validation is **head-to-head, search agent vs blueprint agent, in heads-up NLHE**
+(river/turn subgames from a small heads-up blueprint, AIVAT-style variance reduction), with
+exploitability as a secondary measure where computable.
+
 ## Questions
 
-- **(a)** Does depth-limited search with the 4 continuation strategies give lower exploitability
-  than playing the blueprint alone?
+- **(a)** *(superseded, see above)* Does depth-limited search with the 4 continuation strategies
+  give lower exploitability than playing the blueprint alone?
 - **(b)** Are blueprint-only leaves measurably worse than the 4 continuation strategies?
 
 ## Setup

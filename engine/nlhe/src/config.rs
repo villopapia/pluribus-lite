@@ -22,6 +22,12 @@ use std::fmt;
 
 pub const STREETS: [&str; 4] = ["preflop", "flop", "turn", "river"];
 
+/// Newest config format this binary reads. A config states its format with `version = N`
+/// (absent = 1); older formats are always accepted, a newer one is refused with a clear message
+/// (rather than an "unknown key" error). Keys added in format N require `version >= N`.
+/// Format 2 (2026-11-08): `version`, `players`.
+pub const CONFIG_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbstractionConfig {
     pub name: String,
@@ -49,6 +55,10 @@ pub struct AbstractionConfig {
     pub planned_total_iterations: Option<u64>,
     /// How river buckets are obtained at training time.
     pub river_method: RiverMethod,
+    /// Config format (`version`, absent = 1).
+    pub version: u32,
+    /// Players at the table (format 2; default 6).
+    pub players: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +131,30 @@ impl AbstractionConfig {
             crowded_players: 0,
             planned_total_iterations: None,
             river_method: RiverMethod::OnTheFly,
+            version: 1,
+            players: 6,
+        };
+        // the format first, so a too-new config gets a clear message before any unknown key
+        for raw in text.lines() {
+            let line = raw.split('#').next().unwrap().trim();
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim() == "version" {
+                    c.version = v.trim().parse().map_err(|_| ConfigError(format!("version: {:?}", v.trim())))?;
+                    if c.version == 0 || c.version > CONFIG_VERSION {
+                        return Err(ConfigError(format!(
+                            "config format version {} is newer than this binary supports ({CONFIG_VERSION}); update the binary",
+                            c.version
+                        )));
+                    }
+                }
+            }
+        }
+        let need = |key: &str, v: u32, have: u32| {
+            if have < v {
+                Err(ConfigError(format!("{key} needs `version = {v}` or later (config is version {have})")))
+            } else {
+                Ok(())
+            }
         };
         for (ln, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap().trim();
@@ -155,6 +189,14 @@ impl AbstractionConfig {
                 "planned_total_iterations" => {
                     c.planned_total_iterations =
                         Some(v.replace('_', "").parse().map_err(|_| ConfigError(format!("planned_total_iterations: {v:?}")))?)
+                }
+                "version" => {}
+                "players" => {
+                    need("players", 2, c.version)?;
+                    c.players = v.parse().map_err(|_| ConfigError(format!("players: {v:?}")))?;
+                    if !(2..=6).contains(&c.players) {
+                        return Err(ConfigError(format!("players must be 2..=6, got {}", c.players)));
+                    }
                 }
                 "crowded_players" => {
                     c.crowded_players = v.parse().map_err(|_| ConfigError(format!("crowded_players: {v:?}")))?
@@ -244,6 +286,21 @@ impl AbstractionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_format_versions() {
+        // no `version`: format 1, 6 players; older formats are always accepted
+        let c = AbstractionConfig::parse("flop.0 = 0.5").unwrap();
+        assert_eq!((c.version, c.players), (1, 6));
+        let c = AbstractionConfig::parse("version = 2\nplayers = 2").unwrap();
+        assert_eq!((c.version, c.players), (2, 2));
+        // a format-2 key in a config that does not declare format 2
+        assert!(AbstractionConfig::parse("players = 2").unwrap_err().0.contains("needs `version = 2`"));
+        // a newer format than this binary: clear message, even before an unknown key
+        let e = AbstractionConfig::parse("future_key = 1\nversion = 3").unwrap_err();
+        assert!(e.0.contains("update the binary"), "{e}");
+        assert!(AbstractionConfig::parse("version = 2\nplayers = 7").is_err());
+    }
 
     const TXT: &str = "
         name = t
