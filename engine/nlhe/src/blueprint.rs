@@ -18,7 +18,7 @@
 //!   exactly reproducible and resume bit-identically. Multi-threaded runs are not.
 
 use crate::betting::{BState, Next, Rules};
-use crate::buckets::{preflop_class, CardAbstraction};
+use crate::buckets::{preflop_class, CardAbstraction, RiverFeature};
 use crate::config::AbstractionConfig;
 use crate::equity::{HeroRiver, RiverBatch};
 use crate::eval_lut::{LHand, Lut};
@@ -170,6 +170,10 @@ pub struct Storage {
     chunks: Vec<AtomicPtr<AtomicI32>>,
     next: Mutex<u64>,
     allocated: AtomicU64,
+    /// allocated decision nodes, and their action sequences ((history, action) pairs, the
+    /// unit of the paper's "664,845,654 action sequences ... 413,507,309 encountered")
+    alloc_nodes: AtomicU64,
+    alloc_actions: AtomicU64,
     pub avg: Vec<AtomicU32>,
 }
 
@@ -219,6 +223,8 @@ impl Storage {
             chunks: (0..max_chunks).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
             next: Mutex::new(0),
             allocated: AtomicU64::new(0),
+            alloc_nodes: AtomicU64::new(0),
+            alloc_actions: AtomicU64::new(0),
             avg: (0..tree.n_avg).map(|_| AtomicU32::new(0)).collect(),
         }
     }
@@ -260,6 +266,8 @@ impl Storage {
         self.alloc_chunk((base >> CHUNK_BITS) as usize);
         *next += size;
         self.allocated.fetch_add(size, Ordering::Relaxed);
+        self.alloc_nodes.fetch_add(1, Ordering::Relaxed);
+        self.alloc_actions.fetch_add(nd.n as u64, Ordering::Relaxed);
         self.node_off[node as usize].store(base + 1, Ordering::Release);
         base
     }
@@ -275,6 +283,16 @@ impl Storage {
     /// Regret slots allocated so far (excluding chunk padding).
     pub fn allocated_slots(&self) -> u64 {
         self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Decision nodes allocated so far (betting sequences reached by a traverser).
+    pub fn allocated_nodes(&self) -> u64 {
+        self.alloc_nodes.load(Ordering::Relaxed)
+    }
+
+    /// Action sequences ((history, action) pairs) of the allocated nodes.
+    pub fn allocated_action_sequences(&self) -> u64 {
+        self.alloc_actions.load(Ordering::Relaxed)
     }
 
     /// Physical slot range in use (including padding), for whole-table passes.
@@ -501,6 +519,7 @@ pub struct Deal {
     pub reached_river: bool,
     rb: RiverBatch,
     hr: HeroRiver,
+    clusters: Vec<u8>,
     pub rng: Rng,
 }
 
@@ -528,6 +547,7 @@ impl Deal {
             reached_river: false,
             rb: RiverBatch::new(),
             hr: HeroRiver::new(),
+            clusters: crate::ochs::combo_clusters(),
             rng: Rng::new(0),
         }
     }
@@ -566,16 +586,24 @@ impl Deal {
             2 => abs.turn(h, &[self.board[0], self.board[1], self.board[2], self.board[3]]),
             _ => {
                 let t0 = Instant::now();
-                let eq = if abs.river_needs_equity() {
-                    if !self.river_ready {
-                        self.hr.prepare(&mut self.rb, &self.board);
-                        self.river_ready = true;
+                let kind = abs.river_feature();
+                if kind != RiverFeature::None && !self.river_ready {
+                    self.hr.prepare(&mut self.rb, &self.board);
+                    self.river_ready = true;
+                }
+                let mut feat = [0f32; crate::ochs::N_CLUSTERS];
+                let n = match kind {
+                    RiverFeature::None => 0,
+                    RiverFeature::Equity => {
+                        feat[0] = self.hr.equity(h.0, h.1);
+                        1
                     }
-                    self.hr.equity(h.0, h.1)
-                } else {
-                    0.0
+                    RiverFeature::Ochs => {
+                        self.hr.ochs(h.0, h.1, &self.clusters, &mut feat);
+                        crate::ochs::N_CLUSTERS
+                    }
                 };
-                let v = abs.river(h, &self.board, eq);
+                let v = abs.river(h, &self.board, &feat[..n]);
                 st.river_ns += t0.elapsed().as_nanos() as u64;
                 st.river_calls += 1;
                 v
@@ -1578,6 +1606,12 @@ mod tests {
         assert_eq!(lazy.export_dense(&tree), dense.export_dense(&tree));
         // ... with fewer slots allocated
         assert!(lazy.allocated_slots() < tree.n_regrets, "{} of {}", lazy.allocated_slots(), tree.n_regrets);
+        // reached-sequence counters
+        let all_actions: u64 = tree.actions.iter().sum();
+        assert_eq!(dense.allocated_action_sequences(), all_actions);
+        assert_eq!(dense.allocated_nodes(), tree.decision_nodes.iter().sum::<u64>());
+        assert!(lazy.allocated_action_sequences() < all_actions);
+        assert!(lazy.allocated_action_sequences() >= tree.actions[0]); // preflop always
     }
 
     #[test]

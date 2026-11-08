@@ -12,3 +12,5 @@ pub mod estimate;
 pub mod eval;
 pub mod eval_lut;
 pub mod index;
+pub mod kmeans;
+pub mod ochs;

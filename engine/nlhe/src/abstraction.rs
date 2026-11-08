@@ -1,31 +1,36 @@
-//! M2 card abstraction: flop/turn k-means on equity distributions and river equity cut-offs.
+//! M2 card abstraction following Johanson, Burch, Valenzano & Bowling (AAMAS 2013), the
+//! method Pluribus cites for its information abstraction ([26], supplement p. 13).
 //!
-//! * Flop feature: for one (hole, flop), the 1,081 river equities over all (turn, river)
-//!   run-outs, summarised as `FLOP_DIM` quantiles (u8, 0..255 = equity 0..1).
-//! * Turn feature: the 46 river equities over all rivers, sorted (u8).
-//! * Distance: L1 between features. For equal-size sorted samples or equal-count quantiles
-//!   this is the 1-D earth mover's distance (times a constant).
-//! * Clustering: k-medians (L1 assignment, per-coordinate median update = W1 barycentre),
-//!   k-means++ seeding, fixed seed, deterministic for any thread count.
-//! * River: 1-D k-means on the exact distribution of river equity over all (board, hand)
-//!   pairs. The k-1 midpoints between sorted centroids are the bucket cut-offs.
-//! * Buckets are relabelled so a higher id means a higher mean equity.
+//! * Flop: for one (hole, flop), the **hand-strength histogram** over all (turn, river)
+//!   run-outs (1,081 river equities), `HIST_BINS` equal-width bins on [0, 1].
+//! * Turn: the hand-strength histogram over the 46 rivers.
+//! * Distance: **earth mover's distance**. Points are stored as normalised CDFs, so EMD = L1
+//!   between CDFs (times the bin width) and the k-means mean centroid is the CDF of the mean
+//!   histogram. Clustering: k-means (`kmeans.rs`), k-means++ seeding.
+//! * River: **OCHS**: equity against each of Johanson's 8 opponent clusters (`ochs.rs`),
+//!   k-means with L2 distance. Buckets are computed at training time from the board (no table).
+//! * Buckets are labelled in order of coordinate sum (for CDFs: higher id = lower expected
+//!   strength... see `KMeans::from_centroids`; for OCHS: higher id = stronger).
+//!
+//! The exact feature choices (bin count, single k-means run, fit on a 1,000-board sample) are
+//! recorded as deviations in docs/deviations.md (D-INFO-1, D-INFO-2).
 
-use crate::equity::{combo_cards, RiverBatch, COMBOS};
+use crate::equity::{combo_cards, HeroRiver, RiverBatch, COMBOS};
 use crate::index::hand_index;
-use cfr::rng::Rng;
+use crate::kmeans::KMeans;
+use crate::ochs::{combo_clusters, N_CLUSTERS};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU16, AtomicU8, AtomicUsize, Ordering};
 
-pub const FLOP_DIM: usize = 50;
-pub const TURN_DIM: usize = 46;
+/// Histogram bins for flop/turn hand-strength distributions.
+pub const HIST_BINS: usize = 50;
 pub const RIVER_BINS: usize = 65_536;
 
 #[inline]
-pub fn q8(eq: f32) -> u8 {
-    (eq * 255.0).round() as u8
+pub fn hs_bin(eq: f32) -> usize {
+    ((eq * HIST_BINS as f32) as usize).min(HIST_BINS - 1)
 }
 
 #[inline]
@@ -37,10 +42,10 @@ pub fn q16(eq: f32) -> u16 {
 
 pub struct FeatureScratch {
     pub rb: RiverBatch,
-    hist: Vec<[u16; 256]>,
-    samples: Vec<[u8; 48]>,
-    count: Vec<u8>,
+    hr: HeroRiver,
+    hist: Vec<[u16; HIST_BINS]>,
     combos: Vec<(u8, u8)>,
+    clusters: Vec<u8>,
 }
 
 impl Default for FeatureScratch {
@@ -53,59 +58,52 @@ impl FeatureScratch {
     pub fn new() -> Self {
         FeatureScratch {
             rb: RiverBatch::new(),
-            hist: vec![[0; 256]; COMBOS],
-            samples: vec![[0; 48]; COMBOS],
-            count: vec![0; COMBOS],
+            hr: HeroRiver::new(),
+            hist: vec![[0; HIST_BINS]; COMBOS],
             combos: combo_cards(),
+            clusters: combo_clusters(),
         }
     }
 }
 
-/// Flop features for every hand disjoint from `board`. Calls `f(combo_index, feature)`.
-pub fn flop_features(board: [u8; 3], s: &mut FeatureScratch, mut f: impl FnMut(usize, &[u8; FLOP_DIM])) {
-    for h in s.hist.iter_mut() {
-        *h = [0; 256];
+/// Normalised CDF of a histogram with `total` samples.
+#[inline]
+fn cdf(h: &[u16; HIST_BINS], total: f32, out: &mut [f32; HIST_BINS]) {
+    let mut c = 0u32;
+    for b in 0..HIST_BINS {
+        c += h[b] as u32;
+        out[b] = c as f32 / total;
     }
+}
+
+/// Flop features (hand-strength histogram CDF over 1,081 run-outs) for every hand disjoint
+/// from `board`. Calls `f(combo_index, feature)`.
+pub fn flop_features(board: [u8; 3], s: &mut FeatureScratch, mut f: impl FnMut(usize, &[f32; HIST_BINS])) {
+    s.hist.iter_mut().for_each(|h| *h = [0; HIST_BINS]);
     let rest: Vec<u8> = (0..52u8).filter(|c| !board.contains(c)).collect();
     for i in 0..rest.len() {
         for j in i + 1..rest.len() {
-            let b5 = [board[0], board[1], board[2], rest[i], rest[j]];
-            s.rb.compute(&b5);
+            s.rb.compute(&[board[0], board[1], board[2], rest[i], rest[j]]);
             for (ci, &e) in s.rb.equity.iter().enumerate() {
                 if !e.is_nan() {
-                    s.hist[ci][q8(e) as usize] += 1;
+                    s.hist[ci][hs_bin(e)] += 1;
                 }
             }
         }
     }
-    let mut feat = [0u8; FLOP_DIM];
+    let mut feat = [0f32; HIST_BINS];
     for (ci, &(a, b)) in s.combos.iter().enumerate() {
         if board.contains(&a) || board.contains(&b) {
             continue;
         }
-        let h = &s.hist[ci];
-        let total: u32 = 1081; // C(47, 2) run-outs
-        debug_assert_eq!(h.iter().map(|&x| x as u32).sum::<u32>(), total);
-        let mut cum = 0u32;
-        let mut v = 0usize;
-        for (k, slot) in feat.iter_mut().enumerate() {
-            // value at rank floor((k + 0.5) * total / FLOP_DIM)
-            let target = ((2 * k as u32 + 1) * total) / (2 * FLOP_DIM as u32);
-            while cum + h[v] as u32 <= target {
-                cum += h[v] as u32;
-                v += 1;
-            }
-            *slot = v as u8;
-        }
+        cdf(&s.hist[ci], 1081.0, &mut feat); // C(47, 2) run-outs
         f(ci, &feat);
     }
 }
 
-/// Turn features (46 sorted river equities) for every hand disjoint from `board`.
-pub fn turn_features(board: [u8; 4], s: &mut FeatureScratch, mut f: impl FnMut(usize, &[u8; TURN_DIM])) {
-    for c in s.count.iter_mut() {
-        *c = 0;
-    }
+/// Turn features (hand-strength histogram CDF over the 46 rivers).
+pub fn turn_features(board: [u8; 4], s: &mut FeatureScratch, mut f: impl FnMut(usize, &[f32; HIST_BINS])) {
+    s.hist.iter_mut().for_each(|h| *h = [0; HIST_BINS]);
     for r in 0..52u8 {
         if board.contains(&r) {
             continue;
@@ -113,89 +111,41 @@ pub fn turn_features(board: [u8; 4], s: &mut FeatureScratch, mut f: impl FnMut(u
         s.rb.compute(&[board[0], board[1], board[2], board[3], r]);
         for (ci, &e) in s.rb.equity.iter().enumerate() {
             if !e.is_nan() {
-                let n = s.count[ci] as usize;
-                s.samples[ci][n] = q8(e);
-                s.count[ci] += 1;
+                s.hist[ci][hs_bin(e)] += 1;
             }
         }
     }
-    let mut feat = [0u8; TURN_DIM];
+    let mut feat = [0f32; HIST_BINS];
     for (ci, &(a, b)) in s.combos.iter().enumerate() {
         if board.contains(&a) || board.contains(&b) {
             continue;
         }
-        debug_assert_eq!(s.count[ci] as usize, TURN_DIM);
-        feat.copy_from_slice(&s.samples[ci][..TURN_DIM]);
-        feat.sort_unstable();
+        cdf(&s.hist[ci], 46.0, &mut feat);
         f(ci, &feat);
     }
 }
 
-// ---------------------------------------------------------------- k-medians
-
-#[inline]
-pub fn l1(a: &[u8], b: &[u8]) -> u32 {
-    let mut s = 0u32;
-    let mut ca = a.chunks_exact(16);
-    let mut cb = b.chunks_exact(16);
-    for (x, y) in (&mut ca).zip(&mut cb) {
-        let mut acc = 0u16;
-        for i in 0..16 {
-            acc += x[i].abs_diff(y[i]) as u16;
+/// River OCHS features (equity against Johanson's 8 opponent clusters) for every hand.
+pub fn river_features(board: [u8; 5], s: &mut FeatureScratch, mut f: impl FnMut(usize, &[f32; N_CLUSTERS])) {
+    s.hr.prepare(&mut s.rb, &board);
+    let mut feat = [0f32; N_CLUSTERS];
+    for (ci, &(a, b)) in s.combos.iter().enumerate() {
+        if board.contains(&a) || board.contains(&b) {
+            continue;
         }
-        s += acc as u32;
-    }
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
-        s += x.abs_diff(*y) as u32;
-    }
-    s
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Centroids {
-    pub k: usize,
-    pub dim: usize,
-    pub data: Vec<u8>,
-}
-
-impl Centroids {
-    #[inline]
-    pub fn get(&self, c: usize) -> &[u8] {
-        &self.data[c * self.dim..(c + 1) * self.dim]
-    }
-
-    /// Nearest centroid (lowest index on ties) and its distance.
-    #[inline]
-    pub fn nearest(&self, x: &[u8]) -> (usize, u32) {
-        let mut best = (0usize, u32::MAX);
-        for c in 0..self.k {
-            let d = l1(x, self.get(c));
-            if d < best.1 {
-                best = (c, d);
-            }
-        }
-        best
-    }
-
-    /// Relabel so centroid ids increase with mean value (mean equity).
-    pub fn sort_by_mean(&mut self) {
-        let mut ids: Vec<usize> = (0..self.k).collect();
-        let sum = |c: usize| self.get(c).iter().map(|&v| v as u32).sum::<u32>();
-        ids.sort_by_key(|&c| (sum(c), c));
-        let mut data = Vec::with_capacity(self.data.len());
-        for c in ids {
-            data.extend_from_slice(self.get(c));
-        }
-        self.data = data;
+        s.hr.ochs(a, b, &s.clusters, &mut feat);
+        f(ci, &feat);
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct FitStats {
-    pub iterations: usize,
-    pub changed_last: usize,
-    pub mean_l1: f64,
-    pub empty_reseeds: usize,
+pub fn flop_feat_dyn(b: [u8; 3], s: &mut FeatureScratch, f: &mut dyn FnMut(usize, &[f32; HIST_BINS])) {
+    flop_features(b, s, f)
+}
+pub fn turn_feat_dyn(b: [u8; 4], s: &mut FeatureScratch, f: &mut dyn FnMut(usize, &[f32; HIST_BINS])) {
+    turn_features(b, s, f)
+}
+pub fn river_feat_dyn(b: [u8; 5], s: &mut FeatureScratch, f: &mut dyn FnMut(usize, &[f32; N_CLUSTERS])) {
+    river_features(b, s, f)
 }
 
 pub fn parallel_chunks(n: usize, threads: usize, chunk: usize, f: impl Fn(usize, usize) + Sync) {
@@ -213,122 +163,13 @@ pub fn parallel_chunks(n: usize, threads: usize, chunk: usize, f: impl Fn(usize,
     });
 }
 
-/// k-medians fit. `points` is n * dim bytes. Deterministic for a given seed and any
-/// thread count (integer reductions only).
-pub fn fit_kmedians(points: &[u8], dim: usize, k: usize, max_iters: usize, seed: u64, threads: usize) -> (Centroids, FitStats) {
-    let n = points.len() / dim;
-    assert!(n >= k, "need at least k points");
-    let pt = |i: usize| &points[i * dim..(i + 1) * dim];
-    let mut rng = Rng::new(seed);
+// ---------------------------------------------------------------- legacy 1-D river cut-offs
 
-    // k-means++ seeding on a subsample (L1 distance, D(x) weighting)
-    let sub_n = n.min(20_000);
-    let sub: Vec<usize> = if sub_n == n {
-        (0..n).collect()
-    } else {
-        (0..sub_n).map(|_| (rng.next_u64() % n as u64) as usize).collect()
-    };
-    let mut cent = Centroids { k, dim, data: Vec::with_capacity(k * dim) };
-    cent.data.extend_from_slice(pt(sub[(rng.next_u64() % sub_n as u64) as usize]));
-    let mut dmin: Vec<f64> = sub.iter().map(|&i| l1(pt(i), cent.get(0)) as f64).collect();
-    for c in 1..k {
-        let total: f64 = dmin.iter().sum();
-        let pick = if total > 0.0 { rng.sample_index(&dmin) } else { (rng.next_u64() % sub_n as u64) as usize };
-        cent.data.extend_from_slice(pt(sub[pick]));
-        for (j, &i) in sub.iter().enumerate() {
-            let d = l1(pt(i), cent.get(c)) as f64;
-            if d < dmin[j] {
-                dmin[j] = d;
-            }
-        }
-    }
-
-    let assign = vec![0u16; n];
-    let dist = vec![0u32; n];
-    let assign_a: Vec<AtomicU16> = assign.into_iter().map(AtomicU16::new).collect();
-    let dist_a: Vec<std::sync::atomic::AtomicU32> = dist.into_iter().map(std::sync::atomic::AtomicU32::new).collect();
-    let mut stats = FitStats::default();
-    for it in 0..max_iters {
-        // assignment
-        let changed = AtomicUsize::new(0);
-        {
-            let cent = &cent;
-            parallel_chunks(n, threads, 4096, |a, b| {
-                let mut ch = 0;
-                for i in a..b {
-                    let (c, d) = cent.nearest(pt(i));
-                    if it == 0 || assign_a[i].load(Ordering::Relaxed) != c as u16 {
-                        ch += 1;
-                    }
-                    assign_a[i].store(c as u16, Ordering::Relaxed);
-                    dist_a[i].store(d, Ordering::Relaxed);
-                }
-                changed.fetch_add(ch, Ordering::Relaxed);
-            });
-        }
-        let changed = changed.into_inner();
-        stats.iterations = it + 1;
-        stats.changed_last = changed;
-        stats.mean_l1 = dist_a.iter().map(|d| d.load(Ordering::Relaxed) as f64).sum::<f64>() / n as f64;
-        // median update from per-(cluster, dim) value histograms
-        let mut hist = vec![0u32; k * dim * 256];
-        let mut sizes = vec![0u32; k];
-        for i in 0..n {
-            let c = assign_a[i].load(Ordering::Relaxed) as usize;
-            sizes[c] += 1;
-            let base = c * dim * 256;
-            for (d, &v) in pt(i).iter().enumerate() {
-                hist[base + d * 256 + v as usize] += 1;
-            }
-        }
-        let mut new = cent.data.clone();
-        let mut empties: Vec<usize> = Vec::new();
-        for c in 0..k {
-            if sizes[c] == 0 {
-                empties.push(c);
-                continue;
-            }
-            let half = (sizes[c] + 1) / 2; // lower median
-            for d in 0..dim {
-                let h = &hist[c * dim * 256 + d * 256..c * dim * 256 + d * 256 + 256];
-                let mut cum = 0u32;
-                for (v, &cnt) in h.iter().enumerate() {
-                    cum += cnt;
-                    if cum >= half {
-                        new[c * dim + d] = v as u8;
-                        break;
-                    }
-                }
-            }
-        }
-        // empty clusters: reseed at the currently worst-fitted points (deterministic order)
-        if !empties.is_empty() {
-            let mut far: Vec<(u32, usize)> = (0..n).map(|i| (dist_a[i].load(Ordering::Relaxed), i)).collect();
-            far.sort_unstable_by(|a, b| b.cmp(a));
-            for (j, &c) in empties.iter().enumerate() {
-                new[c * dim..(c + 1) * dim].copy_from_slice(pt(far[j].1));
-            }
-            stats.empty_reseeds += empties.len();
-        }
-        let converged = new == cent.data;
-        cent.data = new;
-        if converged || (it > 0 && empties.is_empty() && changed * 1000 <= n) {
-            break;
-        }
-    }
-    cent.sort_by_mean();
-    (cent, stats)
-}
-
-// ---------------------------------------------------------------- river cut-offs
-
-/// 1-D k-means (Lloyd) on a weighted histogram of quantised equity (bins over [0, 1]),
-/// returning k-1 increasing cut-offs; bucket(e) = #cut-offs <= e.
-///
-/// Empty or duplicate centroids are reseeded at the bin with the largest weighted squared
-/// error (standard k-means practice), so the result has **exactly k distinct, non-empty
-/// clusters** whenever the histogram has at least k non-empty bins. (Without reseeding,
-/// centroids collide on discrete equity values: 193 of 200 in the first build.)
+/// Legacy river abstraction (1-D equity against a random hand), kept only to measure the
+/// OCHS deviation (D-INFO-2). 1-D k-means (Lloyd) on a weighted histogram of quantised
+/// equity, with empty/duplicate centroids reseeded at the highest-error bin, so there are
+/// exactly k distinct non-empty clusters when the histogram has >= k non-empty bins.
+/// Returns k-1 increasing cut-offs; bucket(e) = #cut-offs <= e.
 pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
     let nb = hist.len();
     let total: u64 = hist.iter().sum();
@@ -336,7 +177,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
     let nonempty: Vec<usize> = (0..nb).filter(|&b| hist[b] > 0).collect();
     let k = k.min(nonempty.len());
     let x = |b: usize| b as f64 / (nb - 1) as f64;
-    // init: weighted quantiles (may coincide; repaired below)
     let mut cent: Vec<f64> = Vec::with_capacity(k);
     let mut cum = 0u64;
     let mut bi = 0usize;
@@ -348,7 +188,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
         }
         cent.push(x(bi));
     }
-    // assign every non-empty bin to its nearest centroid (centroids sorted)
     let assign = |cent: &[f64]| -> Vec<usize> {
         let cuts: Vec<f64> = cent.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
         let mut c = 0usize;
@@ -373,7 +212,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
             sx[owner[j]] += hist[b] as f64 * x(b);
         }
         let mut new: Vec<f64> = (0..k).map(|i| if sw[i] > 0.0 { sx[i] / sw[i] } else { f64::NAN }).collect();
-        // repair: empty clusters and duplicate centroids
         let mut bad: Vec<usize> = (0..k).filter(|&i| new[i].is_nan()).collect();
         {
             let mut idx: Vec<usize> = (0..k).filter(|&i| !new[i].is_nan()).collect();
@@ -386,7 +224,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
         }
         let repaired = !bad.is_empty();
         if repaired {
-            // weighted squared error of each bin w.r.t. its current centroid
             let mut err: Vec<(f64, usize)> = nonempty
                 .iter()
                 .enumerate()
@@ -396,7 +233,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
             let mut used: Vec<f64> = new.iter().copied().filter(|v| !v.is_nan()).collect();
             let mut e = err.into_iter();
             for &i in &bad {
-                // next highest-error bin whose position is not already a centroid
                 for (_, b) in e.by_ref() {
                     let v = x(b);
                     if used.iter().all(|&u| (u - v).abs() > 1e-12) {
@@ -416,37 +252,6 @@ pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
     cent.sort_by(|a, b| a.partial_cmp(b).unwrap());
     cent.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
     cent.windows(2).map(|w| (0.5 * (w[0] + w[1])) as f32).collect()
-}
-
-/// Equal-mass cut-offs giving **exactly k non-empty buckets** (needs >= k non-empty bins).
-/// Walks the non-empty bins in order and closes a bucket once its mass reaches the remaining
-/// mass divided by the remaining buckets, or when the remaining non-empty bins are only
-/// just enough for the remaining buckets. A point mass larger than 1/k simply gets its own
-/// (heavier) bucket. Cut-offs sit midway between consecutive non-empty bins.
-pub fn river_cutoffs_equal_mass(hist: &[u64], k: usize) -> Vec<f32> {
-    let nb = hist.len();
-    let x = |b: usize| b as f64 / (nb - 1) as f64;
-    let nonempty: Vec<usize> = (0..nb).filter(|&b| hist[b] > 0).collect();
-    assert!(k >= 1 && nonempty.len() >= k, "need at least k non-empty bins");
-    let mut remaining_mass: u64 = hist.iter().sum();
-    let mut remaining_buckets = k;
-    let mut acc = 0u64;
-    let mut cuts = Vec::with_capacity(k - 1);
-    for (r, &b) in nonempty.iter().enumerate() {
-        acc += hist[b];
-        let bins_left = nonempty.len() - r - 1;
-        if remaining_buckets > 1 && bins_left > 0 {
-            let target = remaining_mass as f64 / remaining_buckets as f64;
-            if acc as f64 >= target || bins_left == remaining_buckets - 1 {
-                cuts.push((0.5 * (x(b) + x(nonempty[r + 1]))) as f32);
-                remaining_mass -= acc;
-                remaining_buckets -= 1;
-                acc = 0;
-            }
-        }
-    }
-    debug_assert_eq!(cuts.len(), k - 1);
-    cuts
 }
 
 #[inline]
@@ -582,23 +387,30 @@ pub fn read_abs_file(path: &Path) -> io::Result<(AbsHeader, Vec<u8>)> {
     Ok((h, payload))
 }
 
-/// Assign every (hole, board) of one street into `table` using `cent`.
-/// `boards` lists the boards to process; `feat` computes features for one board.
+pub fn centroids_to_bytes(c: &[f32]) -> Vec<u8> {
+    c.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+pub fn centroids_from_bytes(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+/// Assign every (hole, board) of one street into `table` using the fitted k-means.
 pub fn assign_table<const B: usize, const D: usize>(
     boards: &[[u8; B]],
-    cent: &Centroids,
+    km: &KMeans,
     table: &BucketTable,
     threads: usize,
-    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[u8; D])),
+    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[f32; D])),
 ) -> Vec<u64> {
-    let counts: Vec<std::sync::atomic::AtomicU64> = (0..cent.k).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+    let counts: Vec<std::sync::atomic::AtomicU64> = (0..km.k).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
     let combos = combo_cards();
     parallel_chunks(boards.len(), threads, 16, |a, b| {
         let mut s = FeatureScratch::new();
-        let mut local = vec![0u64; cent.k];
+        let mut local = vec![0u64; km.k];
         for board in &boards[a..b] {
             feat(*board, &mut s, &mut |ci, x| {
-                let (c, _) = cent.nearest(x);
+                let (c, _) = km.nearest(x);
                 table.set(hand_index(combos[ci], board), c);
                 local[c] += 1;
             });
@@ -610,11 +422,25 @@ pub fn assign_table<const B: usize, const D: usize>(
     counts.into_iter().map(|c| c.into_inner()).collect()
 }
 
-pub fn flop_feat_dyn(b: [u8; 3], s: &mut FeatureScratch, f: &mut dyn FnMut(usize, &[u8; FLOP_DIM])) {
-    flop_features(b, s, f)
-}
-pub fn turn_feat_dyn(b: [u8; 4], s: &mut FeatureScratch, f: &mut dyn FnMut(usize, &[u8; TURN_DIM])) {
-    turn_features(b, s, f)
+/// Bucket sizes of a fitted k-means over all hands of the given boards (no table written).
+pub fn bucket_sizes<const B: usize, const D: usize>(
+    boards: &[[u8; B]],
+    km: &KMeans,
+    threads: usize,
+    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[f32; D])),
+) -> Vec<u64> {
+    let counts: Vec<std::sync::atomic::AtomicU64> = (0..km.k).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+    parallel_chunks(boards.len(), threads, 16, |a, b| {
+        let mut s = FeatureScratch::new();
+        let mut local = vec![0u64; km.k];
+        for board in &boards[a..b] {
+            feat(*board, &mut s, &mut |_, x| local[km.nearest(x).0] += 1);
+        }
+        for (c, v) in local.iter().enumerate() {
+            counts[c].fetch_add(*v, Ordering::Relaxed);
+        }
+    });
+    counts.into_iter().map(|c| c.into_inner()).collect()
 }
 
 /// All k-card boards in colex order.
@@ -639,9 +465,9 @@ pub fn all_boards<const B: usize>() -> Vec<[u8; B]> {
 pub fn sample_points<const B: usize, const D: usize>(
     boards: &[[u8; B]],
     threads: usize,
-    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[u8; D])),
-) -> Vec<u8> {
-    let parts: Vec<std::sync::Mutex<Vec<u8>>> = boards.iter().map(|_| std::sync::Mutex::new(Vec::new())).collect();
+    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[f32; D])),
+) -> Vec<f32> {
+    let parts: Vec<std::sync::Mutex<Vec<f32>>> = boards.iter().map(|_| std::sync::Mutex::new(Vec::new())).collect();
     parallel_chunks(boards.len(), threads, 1, |a, b| {
         let mut s = FeatureScratch::new();
         for i in a..b {
@@ -657,51 +483,21 @@ pub fn sample_points<const B: usize, const D: usize>(
 mod tests {
     use super::*;
     use crate::equity::{combo_index, river_equity_single};
+    use crate::eval::{card_bit, eval};
+    use crate::ochs::cluster_of;
 
-    #[test]
-    fn l1_matches_naive() {
-        let mut rng = Rng::new(1);
-        for len in [3usize, 16, 46, 50, 64] {
-            let a: Vec<u8> = (0..len).map(|_| rng.next_u64() as u8).collect();
-            let b: Vec<u8> = (0..len).map(|_| rng.next_u64() as u8).collect();
-            let naive: u32 = a.iter().zip(&b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs()).sum();
-            assert_eq!(l1(&a, &b), naive);
+    fn cdf_of(eqs: &[f64]) -> Vec<f32> {
+        let mut h = [0u16; HIST_BINS];
+        for &e in eqs {
+            h[hs_bin(e as f32)] += 1;
         }
+        let mut out = [0f32; HIST_BINS];
+        cdf(&h, eqs.len() as f32, &mut out);
+        out.to_vec()
     }
 
     #[test]
-    fn kmedians_recovers_separated_clusters_deterministically() {
-        let mut rng = Rng::new(2);
-        let dim = 8;
-        let centers = [20u8, 120, 220];
-        let mut pts = Vec::new();
-        for i in 0..3000 {
-            let c = centers[i % 3];
-            for _ in 0..dim {
-                pts.push(c.saturating_add((rng.next_u64() % 9) as u8).saturating_sub(4));
-            }
-        }
-        let (c1, st) = fit_kmedians(&pts, dim, 3, 50, 7, 1);
-        let (c4, _) = fit_kmedians(&pts, dim, 3, 50, 7, 4);
-        assert_eq!(c1, c4, "thread count changed the result");
-        let means: Vec<u32> = (0..3).map(|c| c1.get(c).iter().map(|&v| v as u32).sum::<u32>() / dim as u32).collect();
-        for (m, want) in means.iter().zip([20u32, 120, 220]) {
-            assert!(m.abs_diff(want) <= 2, "{means:?}");
-        }
-        assert!(st.mean_l1 < 3.0 * dim as f64);
-    }
-
-    #[test]
-    fn median_update_is_coordinatewise_median() {
-        // one cluster: centroid must be the per-coordinate lower median
-        let pts = vec![1u8, 50, 9, 3, 2, 10, 7, 60, 5, 8, 4, 0];
-        let (c, _) = fit_kmedians(&pts, 2, 1, 5, 0, 1);
-        // coords: [1,9,2,7,5,4] -> sorted 1,2,4,5,7,9 lower median 4 ; [50,3,10,60,8,0] -> 0,3,8,10,50,60 -> 8
-        assert_eq!(c.data, vec![4, 8]);
-    }
-
-    #[test]
-    fn turn_features_match_direct_computation() {
+    fn turn_features_match_direct_histogram() {
         let mut s = FeatureScratch::new();
         let board = [0u8, 13, 26, 39]; // 2c 5d 8h Js
         let mut got = std::collections::HashMap::new();
@@ -710,17 +506,20 @@ mod tests {
         });
         assert_eq!(got.len(), 1128);
         for hole in [(48u8, 49u8), (4, 9), (50, 51)] {
-            let mut want: Vec<u8> = (0..52u8)
+            let eqs: Vec<f64> = (0..52u8)
                 .filter(|r| !board.contains(r) && *r != hole.0 && *r != hole.1)
-                .map(|r| q8(river_equity_single(&[board[0], board[1], board[2], board[3], r], [hole.0, hole.1]) as f32))
+                .map(|r| river_equity_single(&[board[0], board[1], board[2], board[3], r], [hole.0, hole.1]))
                 .collect();
-            want.sort_unstable();
-            assert_eq!(&got[&combo_index(hole.0, hole.1)][..], &want[..]);
+            let want = cdf_of(&eqs);
+            let g = &got[&combo_index(hole.0, hole.1)];
+            for b in 0..HIST_BINS {
+                assert!((g[b] - want[b]).abs() < 1e-6, "bin {b}");
+            }
         }
     }
 
     #[test]
-    fn flop_features_match_direct_quantiles() {
+    fn flop_features_match_direct_histogram() {
         let mut s = FeatureScratch::new();
         let board = [51u8, 30, 7]; // As 9h 3s
         let mut got = std::collections::HashMap::new();
@@ -733,20 +532,52 @@ mod tests {
         let mut eqs = Vec::new();
         for i in 0..rest.len() {
             for j in i + 1..rest.len() {
-                let b5 = [board[0], board[1], board[2], rest[i], rest[j]];
-                eqs.push(q8(river_equity_single(&b5, [hole.0, hole.1]) as f32));
+                eqs.push(river_equity_single(&[board[0], board[1], board[2], rest[i], rest[j]], [hole.0, hole.1]));
             }
         }
-        eqs.sort_unstable();
         assert_eq!(eqs.len(), 1081);
-        let want: Vec<u8> = (0..FLOP_DIM).map(|k| eqs[((2 * k + 1) * 1081) / (2 * FLOP_DIM)]).collect();
-        assert_eq!(&got[&combo_index(hole.0, hole.1)][..], &want[..]);
-        // features are monotone (quantiles)
-        assert!(got.values().all(|f| f.windows(2).all(|w| w[0] <= w[1])));
+        let want = cdf_of(&eqs);
+        let g = &got[&combo_index(hole.0, hole.1)];
+        for b in 0..HIST_BINS {
+            assert!((g[b] - want[b]).abs() < 1e-6, "bin {b}");
+        }
+        // CDFs are monotone and end at 1
+        assert!(got.values().all(|f| f.windows(2).all(|w| w[0] <= w[1]) && (f[HIST_BINS - 1] - 1.0).abs() < 1e-6));
     }
 
     #[test]
-    fn river_cutoffs_split_point_masses() {
+    fn river_ochs_matches_brute_force() {
+        let mut s = FeatureScratch::new();
+        let board = [3u8, 17, 22, 40, 47]; // arbitrary river board
+        let mut got = std::collections::HashMap::new();
+        river_features(board, &mut s, |ci, x| {
+            got.insert(ci, *x);
+        });
+        assert_eq!(got.len(), 1081);
+        let bm = board.iter().fold(0u64, |m, &c| m | card_bit(c));
+        for hole in [(48u8, 49u8), (0, 5), (30, 34)] {
+            let hv = eval(bm | card_bit(hole.0) | card_bit(hole.1));
+            let mut win = [0f64; 8];
+            let mut cnt = [0f64; 8];
+            for (a, b) in combo_cards() {
+                let m = card_bit(a) | card_bit(b);
+                if m & (bm | card_bit(hole.0) | card_bit(hole.1)) != 0 {
+                    continue;
+                }
+                let c = cluster_of(a, b) as usize;
+                let ov = eval(bm | m);
+                cnt[c] += 1.0;
+                win[c] += if hv > ov { 1.0 } else if hv == ov { 0.5 } else { 0.0 };
+            }
+            let g = &got[&combo_index(hole.0, hole.1)];
+            for c in 0..8 {
+                assert!((g[c] as f64 - win[c] / cnt[c]).abs() < 1e-6, "cluster {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_river_cutoffs_split_point_masses_and_give_k_buckets() {
         let mut h = vec![0u64; 1001];
         h[100] = 500;
         h[500] = 300;
@@ -759,41 +590,6 @@ mod tests {
         assert_eq!(river_bucket(&cuts, 0.95), 2);
     }
 
-    fn bucket_masses(h: &[u64], cuts: &[f32]) -> Vec<u64> {
-        let mut m = vec![0u64; cuts.len() + 1];
-        for (b, &w) in h.iter().enumerate() {
-            m[river_bucket(cuts, b as f32 / (h.len() - 1) as f32)] += w;
-        }
-        m
-    }
-
-    #[test]
-    fn equal_mass_cutoffs_give_exactly_k_buckets() {
-        // uniform: equal masses
-        let h = vec![10u64; 1000];
-        let cuts = river_cutoffs_equal_mass(&h, 10);
-        assert_eq!(cuts.len(), 9);
-        assert!(cuts.windows(2).all(|w| w[0] < w[1]));
-        assert!(bucket_masses(&h, &cuts).iter().all(|&m| m == 1000));
-        // heavy point masses (like split pots) still give exactly k non-empty buckets
-        let mut h = vec![0u64; 65_536];
-        let mut rng = Rng::new(3);
-        for _ in 0..5_000 {
-            h[(rng.next_u64() % 65_536) as usize] += 1 + rng.next_u64() % 50;
-        }
-        h[32_768] += 2_000_000; // equity 0.5 point mass, far above 1/k of the total
-        h[0] += 300_000;
-        let cuts = river_cutoffs_equal_mass(&h, 256);
-        assert_eq!(cuts.len(), 255);
-        let m = bucket_masses(&h, &cuts);
-        assert_eq!(m.len(), 256);
-        assert!(m.iter().all(|&x| x > 0), "empty bucket");
-        // k-means with reseeding also gives exactly k distinct, non-empty buckets
-        let km = river_cutoffs(&h, 256, 500);
-        assert_eq!(km.len(), 255);
-        assert!(bucket_masses(&h, &km).iter().all(|&x| x > 0), "k-means left an empty bucket");
-    }
-
     #[test]
     fn abs_file_roundtrip_and_corruption_detected() {
         let dir = std::env::temp_dir().join(format!("plab_{}", std::process::id()));
@@ -803,7 +599,6 @@ mod tests {
         let (h2, pl) = read_abs_file(&p).unwrap();
         assert_eq!(pl, vec![1, 2, 3, 4, 5]);
         assert_eq!((h2.kind.as_str(), h2.k, h2.entries), ("flop", 256, 5));
-        // corrupt the last payload byte
         let mut bytes = fs::read(&p).unwrap();
         *bytes.last_mut().unwrap() ^= 0xff;
         fs::write(&p, bytes).unwrap();
@@ -818,9 +613,8 @@ mod tests {
     }
 
     #[test]
-    fn sort_by_mean_relabels() {
-        let mut c = Centroids { k: 3, dim: 2, data: vec![200, 200, 10, 10, 100, 100] };
-        c.sort_by_mean();
-        assert_eq!(c.data, vec![10, 10, 100, 100, 200, 200]);
+    fn centroid_bytes_roundtrip() {
+        let c = vec![0.5f32, -1.25, 3.0];
+        assert_eq!(centroids_from_bytes(&centroids_to_bytes(&c)), c);
     }
 }

@@ -1,4 +1,5 @@
-//! Build the M2 card abstraction for a config: river cut-offs, flop and turn bucket tables.
+//! Build the M2 card abstraction (Johanson et al. 2013 features): flop/turn EMD k-means on
+//! hand-strength histograms (bucket tables), river OCHS k-means (centroids only).
 //!
 //! `cargo run --release --bin build_abstraction -- --config nlhe/configs/m2_11g.cfg
 //!  --out ../data/abstraction/m2_11g [--threads 12] [--seed 1] [--fit-boards 1000]
@@ -10,6 +11,8 @@
 
 use cfr::rng::Rng;
 use nlhe::abstraction::*;
+use nlhe::kmeans::{self, Metric};
+use nlhe::ochs::N_CLUSTERS;
 use nlhe::config::AbstractionConfig;
 use nlhe::equity::RiverBatch;
 use nlhe::index::{FLOP_ENTRIES, TURN_ENTRIES};
@@ -25,7 +28,7 @@ struct Args {
     fit_boards: usize,
     max_iters: usize,
     stages: Vec<String>,
-    /// "kmeans" (paper: k-means; default) or "equal_mass" (exactly k buckets)
+    /// "ochs" (default: Johanson 2013 OCHS k-means) or "equity1d" (legacy, for comparison)
     river_method: String,
 }
 
@@ -38,7 +41,7 @@ fn parse_args() -> Args {
         fit_boards: 1000,
         max_iters: 30,
         stages: vec!["river".into(), "flop".into(), "turn".into()],
-        river_method: "kmeans".into(),
+        river_method: "ochs".into(),
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -53,7 +56,7 @@ fn parse_args() -> Args {
             "--max-iters" => a.max_iters = val.parse().expect("--max-iters"),
             "--stages" => a.stages = val.split(',').map(|s| s.trim().to_string()).collect(),
             "--river-method" => {
-                assert!(val == "kmeans" || val == "equal_mass", "--river-method kmeans|equal_mass");
+                assert!(val == "ochs" || val == "equity1d", "--river-method ochs|equity1d");
                 a.river_method = val
             }
             other => panic!("unknown argument {other}"),
@@ -118,11 +121,57 @@ impl Log {
     }
 }
 
+/// River: OCHS k-means (default) or the legacy 1-D equity cut-offs (`--river-method equity1d`,
+/// kept only to measure deviation D-INFO-2).
 fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     let k = cfg.buckets[3] as usize;
+    if a.river_method == "equity1d" {
+        return river_stage_equity1d(a, cfg, log, k);
+    }
+    let path = a.out.join("river.ochs");
+    if valid_existing(&path, "river-ochs", cfg, k) {
+        log.line("- river (OCHS): valid output exists, skipped (resume)".into());
+        return;
+    }
+    let mut rng = Rng::new(a.seed ^ 0x51CE);
+    let t0 = Instant::now();
+    let all = all_boards::<5>();
+    let fitb = sample_boards(&all, a.fit_boards, &mut rng);
+    let pts = sample_points::<5, N_CLUSTERS>(&fitb, a.threads, river_feat_dyn);
+    let t_feat = t0.elapsed().as_secs_f64();
+    let t1 = Instant::now();
+    let (km, st) = kmeans::fit(&pts, N_CLUSTERS, k, Metric::L2, a.max_iters, a.seed, a.threads);
+    let t_fit = t1.elapsed().as_secs_f64();
+    drop(pts);
+    // bucket sizes on a second, independent board sample (no river table is stored)
+    let evalb = sample_boards(&all, a.fit_boards, &mut rng);
+    let sizes = bucket_sizes::<5, N_CLUSTERS>(&evalb, &km, a.threads, river_feat_dyn);
+    let h = AbsHeader {
+        kind: "river-ochs".into(),
+        config: cfg.name.clone(),
+        k: k as u32,
+        width: N_CLUSTERS as u8,
+        entries: k as u64,
+        seed: a.seed,
+        checksum: 0,
+    };
+    write_abs_file(&path, &h, &centroids_to_bytes(&km.c)).expect("write river.ochs");
+    log.line(format!(
+        "- river (OCHS, Johanson 2013 opponent clusters): fit sample {} boards / {} points, features {t_feat:.1}s, k-means L2 {t_fit:.1}s ({} iterations, last changed {}, mean squared L2 {:.5}, empty reseeds {})",
+        fitb.len(),
+        fitb.len() * 1081,
+        st.iterations,
+        st.changed_last,
+        st.mean_dist,
+        st.empty_reseeds
+    ));
+    log.line(format!("  - bucket sizes on {} independent river boards: {}", evalb.len(), dist_stats(&sizes)));
+}
+
+fn river_stage_equity1d(a: &Args, cfg: &AbstractionConfig, log: &mut Log, k: usize) {
     let path = a.out.join("river.cut");
     if valid_existing(&path, "river", cfg, k) {
-        log.line("- river: valid output exists, skipped (resume)".into());
+        log.line("- river (legacy 1-D equity): valid output exists, skipped (resume)".into());
         return;
     }
     let t0 = Instant::now();
@@ -145,20 +194,11 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
         }
     });
     let hist = hist.into_inner().unwrap();
-    let t_hist = t0.elapsed().as_secs_f64();
-    let t1 = Instant::now();
-    // equal-mass cut-offs: exactly k buckets (1-D k-means merged coincident centroids)
-    let cuts = if a.river_method == "equal_mass" {
-        river_cutoffs_equal_mass(&hist, k)
-    } else {
-        river_cutoffs(&hist, k, 500)
-    };
-    let t_fit = t1.elapsed().as_secs_f64();
+    let cuts = river_cutoffs(&hist, k, 500);
     let mut mass = vec![0u64; cuts.len() + 1];
     for (bi, &w) in hist.iter().enumerate() {
         mass[river_bucket(&cuts, bi as f32 / (RIVER_BINS - 1) as f32)] += w;
     }
-    let payload: Vec<u8> = cuts.iter().flat_map(|c| c.to_le_bytes()).collect();
     let h = AbsHeader {
         kind: "river".into(),
         config: cfg.name.clone(),
@@ -168,23 +208,14 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
         seed: a.seed,
         checksum: 0,
     };
-    write_abs_file(&path, &h, &payload).expect("write river");
-    log.line(format!(
-        "- river: equity histogram over 2,598,960 boards {t_hist:.1}s, {} cut-offs {t_fit:.2}s, {} cut-offs ({} distinct buckets of {k} requested)",
-        a.river_method,
-        cuts.len(),
-        cuts.len() + 1
-    ));
+    write_abs_file(&path, &h, &centroids_to_bytes(&cuts)).expect("write river");
+    log.line(format!("- river (legacy 1-D equity k-means): {} buckets in {:.1}s", cuts.len() + 1, t0.elapsed().as_secs_f64()));
     log.line(format!("  - mass per bucket: {}", dist_stats(&mass)));
-    log.line(format!(
-        "  - cut-offs: first {:.4} {:.4}, last {:.4} {:.4}",
-        cuts[0],
-        cuts[1],
-        cuts[cuts.len() - 2],
-        cuts[cuts.len() - 1]
-    ));
 }
 
+/// Flop/turn: k-means with EMD on hand-strength histograms (L1 on CDFs), then assignment of
+/// every (hole, board) into a direct-indexed table.
+#[allow(clippy::too_many_arguments)]
 fn table_stage<const B: usize, const D: usize>(
     a: &Args,
     cfg: &AbstractionConfig,
@@ -193,7 +224,7 @@ fn table_stage<const B: usize, const D: usize>(
     k: usize,
     entries: u64,
     salt: u64,
-    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[u8; D])),
+    feat: fn([u8; B], &mut FeatureScratch, &mut dyn FnMut(usize, &[f32; D])),
 ) {
     let path = a.out.join(format!("{stage}.bkt"));
     if valid_existing(&path, stage, cfg, k) {
@@ -207,27 +238,22 @@ fn table_stage<const B: usize, const D: usize>(
     let pts = sample_points::<B, D>(&fitb, a.threads, feat);
     let t_feat = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let (cent, st) = fit_kmedians(&pts, D, k, a.max_iters, a.seed, a.threads);
+    let (km, st) = kmeans::fit(&pts, D, k, Metric::L1, a.max_iters, a.seed, a.threads);
     let t_fit = t1.elapsed().as_secs_f64();
     log.line(format!(
-        "- {stage}: fit sample {} boards / {} points, features {t_feat:.1}s, k-medians {t_fit:.1}s \
-         ({} iterations, last changed {}, mean L1 {:.1}, empty reseeds {})",
+        "- {stage}: hand-strength histograms ({D} bins), EMD k-means; fit sample {} boards / {} points, features {t_feat:.1}s, k-means {t_fit:.1}s ({} iterations, last changed {}, mean EMD {:.3} bins, empty reseeds {})",
         fitb.len(),
         pts.len() / D,
         st.iterations,
         st.changed_last,
-        st.mean_l1,
+        st.mean_dist,
         st.empty_reseeds
     ));
     drop(pts);
     let t2 = Instant::now();
     let table = BucketTable::new(entries as usize, k);
-    let counts = assign_table::<B, D>(&all, &cent, &table, a.threads, feat);
-    log.line(format!(
-        "  - assignment of all {} boards: {:.1}s",
-        all.len(),
-        t2.elapsed().as_secs_f64()
-    ));
+    let counts = assign_table::<B, D>(&all, &km, &table, a.threads, feat);
+    log.line(format!("  - assignment of all {} boards: {:.1}s", all.len(), t2.elapsed().as_secs_f64()));
     let t3 = Instant::now();
     let payload = table.to_bytes();
     drop(table);
@@ -250,7 +276,7 @@ fn table_stage<const B: usize, const D: usize>(
         seed: a.seed,
         checksum: 0,
     };
-    write_abs_file(&a.out.join(format!("{stage}.centroids")), &ch, &cent.data).expect("write centroids");
+    write_abs_file(&a.out.join(format!("{stage}.centroids")), &ch, &centroids_to_bytes(&km.c)).expect("write centroids");
     log.line(format!(
         "  - write {:.1} MiB: {:.1}s; stage total {:.1}s",
         payload.len() as f64 / 1048576.0,
@@ -258,15 +284,6 @@ fn table_stage<const B: usize, const D: usize>(
         t0.elapsed().as_secs_f64()
     ));
     log.line(format!("  - bucket sizes over all (hole, board) pairs: {}", dist_stats(&counts)));
-    let means: Vec<f64> = (0..k)
-        .map(|c| cent.get(c).iter().map(|&v| v as f64).sum::<f64>() / D as f64 / 255.0)
-        .collect();
-    log.line(format!(
-        "  - centroid mean equity: lowest {:.3}, median {:.3}, highest {:.3}",
-        means[0],
-        means[k / 2],
-        means[k - 1]
-    ));
 }
 
 fn main() {
@@ -283,8 +300,8 @@ fn main() {
     for stage in &a.stages {
         match stage.as_str() {
             "river" => river_stage(&a, &cfg, &mut log),
-            "flop" => table_stage::<3, FLOP_DIM>(&a, &cfg, &mut log, "flop", cfg.buckets[1] as usize, FLOP_ENTRIES, 0xF10F, flop_feat_dyn),
-            "turn" => table_stage::<4, TURN_DIM>(&a, &cfg, &mut log, "turn", cfg.buckets[2] as usize, TURN_ENTRIES, 0x7A2A, turn_feat_dyn),
+            "flop" => table_stage::<3, HIST_BINS>(&a, &cfg, &mut log, "flop", cfg.buckets[1] as usize, FLOP_ENTRIES, 0xF10F, flop_feat_dyn),
+            "turn" => table_stage::<4, HIST_BINS>(&a, &cfg, &mut log, "turn", cfg.buckets[2] as usize, TURN_ENTRIES, 0x7A2A, turn_feat_dyn),
             other => panic!("unknown stage {other}"),
         }
     }

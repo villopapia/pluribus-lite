@@ -1,12 +1,14 @@
 //! Card abstraction sources used by the blueprint trainer.
 //!
 //! * [`preflop_class`]: the 169 lossless preflop classes.
-//! * [`TableAbstraction`]: the built M2 abstraction (flop/turn tables, river cut-offs), with
+//! * [`TableAbstraction`]: the built M2 abstraction (flop/turn tables, river OCHS k-means), with
 //!   optional coarsening to fewer buckets. Buckets are sorted by mean equity, so coarsening
 //!   (bucket * target / fine) merges neighbouring buckets.
 //! * [`StrengthAbstraction`]: table-free hand-strength classes, used by tests and quick runs.
 
-use crate::abstraction::{read_abs_file, river_bucket};
+use crate::abstraction::{centroids_from_bytes, read_abs_file, river_bucket};
+use crate::kmeans::{KMeans, Metric};
+use crate::ochs::N_CLUSTERS;
 use crate::eval_lut::{LHand, Lut, N_CLASSES};
 use crate::index::hand_index;
 use std::io;
@@ -29,42 +31,71 @@ pub fn preflop_class(a: u8, b: u8) -> u16 {
     }
 }
 
+/// Which river feature the trainer must compute for `CardAbstraction::river`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RiverFeature {
+    /// none (the abstraction looks only at the cards)
+    None,
+    /// [equity against one random hand] (legacy 1-D river)
+    Equity,
+    /// OCHS: 8 equities against Johanson et al.'s opponent clusters
+    Ochs,
+}
+
 pub trait CardAbstraction: Sync + Send {
     /// Buckets per street (preflop is always 169).
     fn buckets(&self) -> [u32; 4];
     fn flop(&self, hole: (u8, u8), board: &[u8; 3]) -> u16;
     fn turn(&self, hole: (u8, u8), board: &[u8; 4]) -> u16;
-    /// River bucket. `equity` is only valid when `river_needs_equity()` is true.
-    fn river(&self, hole: (u8, u8), board: &[u8; 5], equity: f32) -> u16;
-    fn river_needs_equity(&self) -> bool;
+    /// River bucket from the feature named by `river_feature()`.
+    fn river(&self, hole: (u8, u8), board: &[u8; 5], feature: &[f32]) -> u16;
+    fn river_feature(&self) -> RiverFeature;
+}
+
+enum RiverModel {
+    Ochs(KMeans),
+    Cutoffs(Vec<f32>),
 }
 
 pub struct TableAbstraction {
     flop: Vec<u8>,
     turn: Vec<u8>,
-    cuts: Vec<f32>,
+    river: RiverModel,
     fine: [u32; 4],
     target: [u32; 4],
 }
 
 impl TableAbstraction {
-    /// Load `<dir>/{flop.bkt, turn.bkt, river.cut}`; coarsen post-flop streets to `target`
-    /// buckets (must be <= the built count). u8 tables only (built k <= 256).
+    /// Load `<dir>/{flop.bkt, turn.bkt}` and the river model: `river.ochs` (OCHS k-means
+    /// centroids, preferred) or the legacy `river.cut` (1-D equity cut-offs). Post-flop
+    /// streets are coarsened to `target` buckets (<= the built count). u8 tables only.
     pub fn load(dir: &Path, target: u32) -> io::Result<Self> {
         let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
         let (fh, flop) = read_abs_file(&dir.join("flop.bkt"))?;
         let (th, turn) = read_abs_file(&dir.join("turn.bkt"))?;
-        let (rh, cut_bytes) = read_abs_file(&dir.join("river.cut"))?;
         if fh.width != 1 || th.width != 1 {
             return Err(bad("only u8 bucket tables are supported".into()));
         }
-        let cuts: Vec<f32> = cut_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let fine = [169, fh.k, th.k, cuts.len() as u32 + 1];
+        let (river, rk) = if dir.join("river.ochs").exists() {
+            let (rh, bytes) = read_abs_file(&dir.join("river.ochs"))?;
+            let c = centroids_from_bytes(&bytes);
+            let km = KMeans::from_centroids(c, N_CLUSTERS, Metric::L2);
+            if km.k != rh.k as usize {
+                return Err(bad("river.ochs centroid count mismatch".into()));
+            }
+            let k = km.k as u32;
+            (RiverModel::Ochs(km), k)
+        } else {
+            let (_, bytes) = read_abs_file(&dir.join("river.cut"))?;
+            let cuts = centroids_from_bytes(&bytes);
+            let k = cuts.len() as u32 + 1;
+            (RiverModel::Cutoffs(cuts), k)
+        };
+        let fine = [169, fh.k, th.k, rk];
         if target == 0 || fine[1..].iter().any(|&k| target > k) {
             return Err(bad(format!("target {target} must be in 1..=built buckets {fine:?}")));
         }
-        let _ = rh;
-        Ok(TableAbstraction { flop, turn, cuts, fine, target: [169, target, target, target] })
+        Ok(TableAbstraction { flop, turn, river, fine, target: [169, target, target, target] })
     }
 
     #[inline]
@@ -86,11 +117,18 @@ impl CardAbstraction for TableAbstraction {
         self.coarse(2, self.turn[hand_index(hole, board) as usize] as usize)
     }
     #[inline]
-    fn river(&self, _hole: (u8, u8), _board: &[u8; 5], equity: f32) -> u16 {
-        self.coarse(3, river_bucket(&self.cuts, equity))
+    fn river(&self, _hole: (u8, u8), _board: &[u8; 5], feature: &[f32]) -> u16 {
+        let fine = match &self.river {
+            RiverModel::Ochs(km) => km.nearest(feature).0,
+            RiverModel::Cutoffs(c) => river_bucket(c, feature[0]),
+        };
+        self.coarse(3, fine)
     }
-    fn river_needs_equity(&self) -> bool {
-        true
+    fn river_feature(&self) -> RiverFeature {
+        match self.river {
+            RiverModel::Ochs(_) => RiverFeature::Ochs,
+            RiverModel::Cutoffs(_) => RiverFeature::Equity,
+        }
     }
 }
 
@@ -118,11 +156,11 @@ impl CardAbstraction for StrengthAbstraction {
     fn turn(&self, h: (u8, u8), b: &[u8; 4]) -> u16 {
         self.of(&[h.0, h.1, b[0], b[1], b[2], b[3]])
     }
-    fn river(&self, h: (u8, u8), b: &[u8; 5], _e: f32) -> u16 {
+    fn river(&self, h: (u8, u8), b: &[u8; 5], _f: &[f32]) -> u16 {
         self.of(&[h.0, h.1, b[0], b[1], b[2], b[3], b[4]])
     }
-    fn river_needs_equity(&self) -> bool {
-        false
+    fn river_feature(&self) -> RiverFeature {
+        RiverFeature::None
     }
 }
 
@@ -149,8 +187,8 @@ mod tests {
     #[test]
     fn strength_abstraction_is_monotone_in_class() {
         let s = StrengthAbstraction { k: 8 };
-        let royal = s.river((48, 44), &[40, 36, 32, 1, 2], 0.0); // As Ks Qs Js Ts (spades = suit 0 here)
-        let junk = s.river((0, 5), &[10, 23, 33, 46, 15], 0.0);
+        let royal = s.river((48, 44), &[40, 36, 32, 1, 2], &[]); // As Ks Qs Js Ts (spades = suit 0 here)
+        let junk = s.river((0, 5), &[10, 23, 33, 46, 15], &[]);
         assert!(royal > junk);
         assert!(royal < 8);
     }

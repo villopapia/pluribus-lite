@@ -313,6 +313,13 @@ impl HeroRiver {
         rb.fill_classes(board, &mut self.classes, &mut self.masks);
     }
 
+    /// OCHS of (a, b) on the prepared board: equity against each of Johanson et al.'s 8
+    /// opponent clusters (`clusters` = `ochs::combo_clusters()`).
+    #[inline]
+    pub fn ochs(&self, a: u8, b: u8, clusters: &[u8], out: &mut [f32; crate::ochs::N_CLUSTERS]) {
+        crate::ochs::ochs_from(&self.classes, &self.masks, clusters, combo_index(a, b), out);
+    }
+
     /// Equity of (a, b) against one random opponent hand on the prepared board.
     #[inline]
     pub fn equity(&self, a: u8, b: u8) -> f32 {

@@ -198,7 +198,7 @@ fn main() {
     lg.prev_pre = policy_snapshot(&tree, &st, &lg.pre_s);
     lg.prev_post = policy_snapshot(&tree, &st, &lg.post_s);
     if new_file {
-        writeln!(lg.file, "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tphase").unwrap();
+        writeln!(lg.file, "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tseq_reached\tseq_reached_frac\tphase").unwrap();
     }
 
     let wall0 = Instant::now();
@@ -326,7 +326,7 @@ fn main() {
                 row += &format!("\t{:.4}", rs.touched[sidx] as f64 / rs.infosets[sidx].max(1) as f64);
             }
             row += &format!(
-                "\t{:.5}\t{:.5}\t{}\t{}\t{}\t{:.3}\t{:.4}\t{}",
+                "\t{:.5}\t{:.5}\t{}\t{}\t{}\t{:.3}\t{:.4}\t{}\t{:.4}\t{}",
                 ch_pre,
                 ch_post,
                 total.regret.saturated,
@@ -334,6 +334,8 @@ fn main() {
                 snapshots,
                 st.allocated_slots() as f64 * 4.0 / 1073741824.0,
                 st.allocated_slots() as f64 / tree.n_regrets as f64,
+                st.allocated_action_sequences(),
+                st.allocated_action_sequences() as f64 / tree.actions.iter().sum::<u64>() as f64,
                 phase
             );
             println!("{row}");
