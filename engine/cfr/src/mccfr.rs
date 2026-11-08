@@ -43,6 +43,11 @@ pub struct MccfrConfig {
     /// NOT in the paper. In pruned traversals, always explore the action with the
     /// highest regret even if it is <= C, so a node can never have every action pruned.
     pub always_explore_best: bool,
+    /// Regret floor (paper: -310,000,000 for every action). `None` = no floor.
+    pub regret_floor: Option<f64>,
+    /// Paper (supplement pp. 3, 14): pruning never skips actions on the final betting round
+    /// or actions that immediately lead to a terminal node. Default true (paper-faithful).
+    pub prune_skip_final_round_and_terminal: bool,
 }
 
 impl MccfrConfig {
@@ -60,8 +65,15 @@ impl MccfrConfig {
             prune_regret_c: -300_000_000.0 * max_abs_utility / 10_000.0,
             lcfr_threshold: frac(400.0),
             discount_interval: frac(10.0),
+            // Paper: average strategy on the first betting round only. For the two-player
+            // toy games we average every round: with round-0-only averaging and the current
+            // strategy elsewhere, Leduc stays ~1 chip exploitable (see the test
+            // `paper_avg_rule_on_leduc_needs_postflop_averaging`). Pluribus averaged post-flop
+            // snapshots instead (implemented in M3). Set `avg_max_round = 0` for the literal rule.
             avg_max_round: u8::MAX,
             always_explore_best: false,
+            regret_floor: Some(-310_000_000.0 * max_abs_utility / 10_000.0),
+            prune_skip_final_round_and_terminal: true,
         }
     }
 
@@ -76,6 +88,8 @@ impl MccfrConfig {
             self.discount_interval as f64,
             self.avg_max_round as f64,
             self.always_explore_best as u8 as f64,
+            self.regret_floor.unwrap_or(f64::NAN),
+            self.prune_skip_final_round_and_terminal as u8 as f64,
         ]
     }
 
@@ -91,6 +105,9 @@ impl MccfrConfig {
             avg_max_round: p[7] as u8,
             // absent in checkpoints written before the flag existed
             always_explore_best: p.get(8).is_some_and(|&x| x != 0.0),
+            // absent in older checkpoints: they ran without floor and without the exception
+            regret_floor: p.get(9).copied().filter(|x| !x.is_nan()),
+            prune_skip_final_round_and_terminal: p.get(10).is_some_and(|&x| x != 0.0),
         }
     }
 }
@@ -220,9 +237,13 @@ impl<G: Game> Mccfr<G> {
                         va[k] = self.traverse(&self.game.apply(s, acts.as_slice()[k]), i);
                         v += sigma[k] * va[k];
                     }
+                    let floor = self.cfg.regret_floor;
                     let inf = self.table.get_or_insert(key, n);
                     for k in 0..n {
                         inf.regret[k] += va[k] - v;
+                        if let Some(f) = floor {
+                            inf.regret[k] = inf.regret[k].max(f);
+                        }
                     }
                     v
                 } else {
@@ -259,19 +280,27 @@ impl<G: Game> Mccfr<G> {
                     }
                     // first index of the maximum regret (deterministic tie-break)
                     let best = (0..n).fold(0, |b, k| if regret[k] > regret[b] { k } else { b });
+                    let final_round = self.game.round(s) + 1 == self.game.num_rounds();
                     for k in 0..n {
-                        if regret[k] > c || (self.cfg.always_explore_best && k == best) {
-                            va[k] = self.traverse_pruned(&self.game.apply(s, acts.as_slice()[k]), i);
+                        let child = self.game.apply(s, acts.as_slice()[k]);
+                        let exempt = self.cfg.prune_skip_final_round_and_terminal
+                            && (final_round || self.game.kind(&child) == NodeKind::Terminal);
+                        if exempt || regret[k] > c || (self.cfg.always_explore_best && k == best) {
+                            va[k] = self.traverse_pruned(&child, i);
                             explored[k] = true;
                             v += sigma[k] * va[k];
                         } else {
                             self.stats.pruned_actions += 1;
                         }
                     }
+                    let floor = self.cfg.regret_floor;
                     let inf = self.table.get_or_insert(key, n);
                     for k in 0..n {
                         if explored[k] {
                             inf.regret[k] += va[k] - v;
+                            if let Some(f) = floor {
+                                inf.regret[k] = inf.regret[k].max(f);
+                            }
                         }
                     }
                     v
@@ -378,6 +407,7 @@ mod tests {
         let total = 1_000_000;
         let mut cfg = MccfrConfig::pluribus_scaled(total, Kuhn.max_abs_utility(), 2);
         cfg.prune_regret_c = -5.0;
+        cfg.prune_skip_final_round_and_terminal = false; // Kuhn has one round: test the mechanism
         let mut s = Mccfr::new(Kuhn, cfg);
         s.run(total / 10);
         let e_early = exploitability(&Kuhn, &s.average_policy());
@@ -385,6 +415,59 @@ mod tests {
         assert!(s.stats.pruned_actions > 0);
         let e = exploitability(&Kuhn, &s.average_policy());
         assert!(e < 0.01 && e < e_early, "exploitability {e_early} -> {e}");
+    }
+
+    #[test]
+    fn paper_pruning_exception_never_prunes_kuhn_and_spares_final_round_in_leduc() {
+        // Kuhn: one betting round, so everything is "final round": nothing may be pruned.
+        let total = 200_000;
+        let mut cfg = MccfrConfig::pluribus_scaled(total, Kuhn.max_abs_utility(), 3);
+        cfg.prune_regret_c = -5.0;
+        assert!(cfg.prune_skip_final_round_and_terminal); // paper-faithful default
+        let mut s = Mccfr::new(Kuhn, cfg);
+        s.run(total);
+        assert!(s.stats.pruned_traversals > 0);
+        assert_eq!(s.stats.pruned_actions, 0);
+        // Leduc: pruning still happens (round 0, non-terminal actions only)
+        let mut cfg = MccfrConfig::pluribus_scaled(total, Leduc.max_abs_utility(), 3);
+        cfg.prune_regret_c = -5.0;
+        let mut l = Mccfr::new(Leduc, cfg.clone());
+        l.run(total);
+        let mut cfg_off = cfg;
+        cfg_off.prune_skip_final_round_and_terminal = false;
+        let mut l_off = Mccfr::new(Leduc, cfg_off);
+        l_off.run(total);
+        assert!(l.stats.pruned_actions > 0);
+        assert!(l.stats.pruned_actions < l_off.stats.pruned_actions);
+    }
+
+    /// Documents why M1 averages all rounds: the literal paper rule (phi on round 0 only,
+    /// current strategy elsewhere) leaves Leduc far more exploitable.
+    #[test]
+    fn paper_avg_rule_on_leduc_needs_postflop_averaging() {
+        let total = 1_000_000;
+        let all = MccfrConfig::pluribus_scaled(total, Leduc.max_abs_utility(), 1);
+        let first_only = MccfrConfig { avg_max_round: 0, ..all.clone() };
+        let mut a = Mccfr::new(Leduc, all);
+        a.run(total);
+        let mut b = Mccfr::new(Leduc, first_only);
+        b.run(total);
+        let ea = exploitability(&Leduc, &a.average_policy());
+        let eb = exploitability(&Leduc, &b.average_policy());
+        assert!(ea < 0.02, "all-round average {ea}");
+        assert!(eb > 10.0 * ea, "round-0-only average {eb} vs all rounds {ea}");
+    }
+
+    #[test]
+    fn regret_floor_is_respected() {
+        let total = 300_000;
+        let mut cfg = MccfrConfig::pluribus_scaled(total, Leduc.max_abs_utility(), 4);
+        cfg.regret_floor = Some(-50.0);
+        let mut s = Mccfr::new(Leduc, cfg);
+        s.run(total);
+        let min = s.table.map.values().flat_map(|i| i.regret.iter().copied()).fold(f64::INFINITY, f64::min);
+        assert!(min >= -50.0, "min regret {min}");
+        assert!(min <= -49.0, "floor never reached ({min}); test not exercising it");
     }
 
     #[test]
@@ -414,6 +497,8 @@ mod tests {
             discount_interval: 1,
             avg_max_round: u8::MAX,
             always_explore_best: false,
+            regret_floor: None,
+            prune_skip_final_round_and_terminal: false,
         };
         let mut s = Mccfr::new(Kuhn, cfg.clone());
         s.iterate();
@@ -439,6 +524,8 @@ mod tests {
             discount_interval: 1,
             avg_max_round: u8::MAX,
             always_explore_best,
+            regret_floor: None,
+            prune_skip_final_round_and_terminal: false, // test the mechanism itself
         }
     }
 
@@ -466,6 +553,7 @@ mod tests {
         let mut cfg = MccfrConfig::pluribus_scaled(total, Kuhn.max_abs_utility(), 2);
         cfg.prune_regret_c = -5.0;
         cfg.always_explore_best = true;
+        cfg.prune_skip_final_round_and_terminal = false;
         let mut s = Mccfr::new(Kuhn, cfg);
         s.run(total);
         let e = exploitability(&Kuhn, &s.average_policy());
