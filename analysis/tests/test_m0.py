@@ -101,3 +101,17 @@ def test_donk_spots_strict_definition():
     hh = HandHistory.loads(donk_hand)
     spots = m0_donk.donk_spots(list(hh.actions), list(hh.players), "t/2")
     assert [(x["street"], x["donk"], x["amount_to"]) for x in spots] == [("flop", True, 300)]
+
+
+def test_calibrate_sizes_rule():
+    import calibrate_sizes as cs
+
+    shares = {
+        ("preflop", 0): pd.Series({0.5: 0.6, 0.4: 0.3, 1.0: 0.1}),
+        ("flop", 0): pd.Series({0.5: 0.95, 2.0: 0.05}),
+    }
+    assert cs.size_sets(shares, 0.2) == {("preflop", 0): [0.4, 0.5], ("flop", 0): [0.5]}
+    assert cs.size_sets(shares, 0.99) == {("preflop", 0): [0.5], ("flop", 0): [0.5]}  # keep the mode
+    txt = cs.config_text("x", cs.size_sets(shares, 0.2), 0.2)
+    assert "preflop.0 = 0.4, 0.5" in txt and "preflop.3+ = 1" in txt and "flop.2+ = 1" in txt
+    assert "turn.0 = 0.5, 1" in txt and "river.1+ = 1" in txt and "limp = all" in txt
