@@ -39,6 +39,17 @@ fn rank(card: u8) -> u8 {
     card / 2
 }
 
+/// What player `p` knows at `s` (betting history, board rank, own rank). Equals the infoset key
+/// when `p` is to act. Keys are below 4^13.
+pub fn key_for(s: &LeducState, p: usize) -> u64 {
+    let mut k: u64 = 1;
+    for &h in &s.hist[..s.hl as usize] {
+        k = k * 4 + h as u64;
+    }
+    let board_code = if s.board == NONE { 0 } else { rank(s.board) as u64 + 1 };
+    (k * 4 + board_code) * 4 + rank(s.cards[p]) as u64
+}
+
 impl LeducState {
     fn outstanding(&self) -> bool {
         let me = self.to_act as usize;
@@ -197,12 +208,7 @@ impl Game for Leduc {
     }
 
     fn infoset_key(&self, s: &LeducState) -> u64 {
-        let mut k: u64 = 1;
-        for &h in &s.hist[..s.hl as usize] {
-            k = k * 4 + h as u64;
-        }
-        let board_code = if s.board == NONE { 0 } else { rank(s.board) as u64 + 1 };
-        (k * 4 + board_code) * 4 + rank(s.cards[s.to_act as usize]) as u64
+        key_for(s, s.to_act as usize)
     }
 
     fn round(&self, s: &LeducState) -> u8 {

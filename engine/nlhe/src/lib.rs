@@ -3,10 +3,12 @@
 //! equity. Nothing here allocates strategy tables or trains.
 
 pub mod abstraction;
+pub mod belief;
 pub mod betting;
 pub mod blueprint;
 pub mod buckets;
 pub mod config;
+pub mod continuation;
 pub mod equity;
 pub mod estimate;
 pub mod eval;
@@ -15,3 +17,4 @@ pub mod index;
 pub mod kmeans;
 pub mod ochs;
 pub mod river_table;
+pub mod subgame;

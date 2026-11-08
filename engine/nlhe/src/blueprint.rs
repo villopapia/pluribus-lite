@@ -35,7 +35,7 @@ pub const DECISION: u8 = 0;
 pub const FOLD_END: u8 = 1;
 pub const SHOWDOWN: u8 = 2;
 pub const MAX_P: usize = 6;
-const MAX_A: usize = 8;
+pub const MAX_A: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TNode {
@@ -591,11 +591,21 @@ impl Deal {
             let j = k + (self.rng.next_u64() % (52 - k) as u64) as usize;
             deck.swap(k, j);
         }
-        self.board.copy_from_slice(&deck[2 * players..2 * players + 5]);
+        let mut hole = [(0u8, 0u8); MAX_P];
+        for (p, h) in hole.iter_mut().enumerate().take(players) {
+            *h = (deck[2 * p], deck[2 * p + 1]);
+        }
+        let board = std::array::from_fn(|k| deck[2 * players + k]);
+        self.set(&hole[..players], board);
+    }
+
+    /// Use the given hole cards and full board: preflop buckets and showdown classes now,
+    /// post-flop buckets lazily (cached buckets of the previous deal are dropped).
+    pub fn set(&mut self, hole: &[(u8, u8)], board: [u8; 5]) {
+        self.board = board;
         let lut = Lut::get();
         let bh = LHand::of(&self.board);
-        for p in 0..players {
-            let h = (deck[2 * p], deck[2 * p + 1]);
+        for (p, &h) in hole.iter().enumerate() {
             self.hole[p] = h;
             self.bucket[p] = [preflop_class(h.0, h.1), u16::MAX, u16::MAX, u16::MAX];
             self.sd[p] = lut.class(bh.add(h.0).add(h.1));

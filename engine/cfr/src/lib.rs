@@ -16,6 +16,8 @@ pub mod game;
 pub mod intregret;
 pub mod kuhn;
 pub mod leduc;
+pub mod leduc_subgame;
 pub mod mccfr;
 pub mod rng;
+pub mod search;
 pub mod table;
