@@ -87,6 +87,8 @@ pub struct Subgame {
     /// seats whose decisions are forced folds (fold if legal, else check): the preflop
     /// "folded players fixed" reading of a round-start root (D-SRCH-14)
     pub forced_fold: u8,
+    /// Algorithm 2's AddAction: (state, action) pairs added to the abstraction (stage 5)
+    pub extra: Vec<(BState, Action)>,
 }
 
 impl Subgame {
@@ -98,25 +100,52 @@ impl Subgame {
     /// `root_cfg` sizes on the root's street, `later_cfg` on the streets after it (D-SRCH-3);
     /// stops expanding once `cap` nodes exist (`truncated`; for size measurements only).
     pub fn build_with(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize) -> Subgame {
-        Self::build_inner(rules, root_cfg, later_cfg, root, cap, 0)
+        Self::build_inner(rules, root_cfg, later_cfg, root, cap, 0, vec![])
     }
 
     /// Preflop subgame from the start of the hand in which the seats in `forced_fold` only fold
     /// (or check when folding is not legal): the "folded players fixed" reading (D-SRCH-14).
     pub fn build_preflop_fixed(rules: &Rules, cfg: &AbstractionConfig, forced_fold: u8, cap: usize) -> Subgame {
-        Self::build_inner(rules, cfg, cfg, rules.root(), cap, forced_fold)
+        Self::build_inner(rules, cfg, cfg, rules.root(), cap, forced_fold, vec![])
     }
 
-    fn build_inner(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize, forced_fold: u8) -> Subgame {
+    /// `build_with` plus Algorithm 2's added off-tree actions.
+    pub fn build_extra(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, extra: Vec<(BState, Action)>) -> Subgame {
+        Self::build_inner(rules, root_cfg, later_cfg, root, usize::MAX, 0, extra)
+    }
+
+    fn build_inner(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize, forced_fold: u8, extra: Vec<(BState, Action)>) -> Subgame {
         if root.street == 0 {
             assert_eq!(root, rules.root(), "a preflop subgame starts at the start of the hand");
         } else {
             assert!(root.raises == 0 && root.street_bet.iter().all(|&b| b == 0), "the root must be the start of a round");
         }
         let rule = LeafRule::for_root(rules, &root);
-        let mut g = Subgame { rule, root_street: root.street, nodes: Vec::new(), children: Vec::new(), edges: Vec::new(), truncated: false, cap, forced_fold };
+        let mut g = Subgame { rule, root_street: root.street, nodes: Vec::new(), children: Vec::new(), edges: Vec::new(), truncated: false, cap, forced_fold, extra };
         g.add(rules, [root_cfg, later_cfg], root, Kind::Decision);
         g
+    }
+
+    /// Actions at a decision state: the config's, filtered for forced folds, plus Algorithm 2's
+    /// added off-tree actions at this exact state (raises in increasing order).
+    fn actions_at(&self, rules: &Rules, cfgs: [&AbstractionConfig; 2], s: &BState, forced: u8) -> Vec<Action> {
+        let mut acts: Vec<Action> = rules
+            .actions(s, cfgs[(s.street != self.root_street) as usize])
+            .into_iter()
+            .filter(|&a| forced & (1 << s.to_act) == 0 || a == Action::Fold || (a == Action::Call && !rules.actions(s, cfgs[0]).contains(&Action::Fold)))
+            .collect();
+        for (st, a) in &self.extra {
+            if st == s && !acts.contains(a) {
+                acts.push(*a);
+            }
+        }
+        let rank = |a: &Action| match a {
+            Action::Fold => 0,
+            Action::Call => 1,
+            Action::RaiseTo(t) => 2 + *t as u64,
+        };
+        acts.sort_by_key(rank);
+        acts
     }
 
     fn add(&mut self, rules: &Rules, cfgs: [&AbstractionConfig; 2], s: BState, kind: Kind) -> u32 {
@@ -128,10 +157,8 @@ impl Subgame {
         }
         let forced = self.forced_fold;
         let kids: Vec<(Option<Action>, u32)> = match kind {
-            Kind::Decision => rules
-                .actions(&s, cfgs[(s.street != self.root_street) as usize])
-                .into_iter()
-                .filter(|&a| forced & (1 << s.to_act) == 0 || a == Action::Fold || (a == Action::Call && !rules.actions(&s, cfgs[0]).contains(&Action::Fold)))
+            Kind::Decision => self
+                .actions_at(rules, cfgs, &s, forced)
                 .into_iter()
                 .map(|a| {
                     let child = match rules.apply(&s, a) {
@@ -287,6 +314,21 @@ mod tests {
         let after = g.child(bet, 2); // next player: [fold, call, 1 pot, all-in]
         assert!(matches!(g.action(bet, 2), Some(RaiseTo(_))));
         assert_eq!(g.nodes[after as usize].kind, Kind::Leaf);
+    }
+
+    #[test]
+    fn added_off_tree_actions_appear_at_their_state_only() {
+        let r = Rules { players: 2, ..Rules::default() };
+        let root = play(&r, &[Call, Call, Call, Call, Call, Call]); // heads-up river, pot 200
+        let c = cfg("allin = true");
+        let base = Subgame::build(&r, &c, root);
+        // Algorithm 2's AddAction: the opponent bet 130 (off-tree) at the river root
+        let g = Subgame::build_extra(&r, &c, &c, root, vec![(root, RaiseTo(130))]);
+        assert_eq!((0..g.nodes[0].n as usize).map(|i| g.action(0, i).unwrap()).collect::<Vec<_>>(), vec![Call, RaiseTo(130), RaiseTo(9_900)]);
+        // the new branch has its own subtree; other states are unchanged (only check / all-in)
+        assert!(action_sequences(&g) > action_sequences(&base));
+        let after_check = g.child(0, 0);
+        assert_eq!(g.nodes[after_check as usize].n, 2);
     }
 
     #[test]

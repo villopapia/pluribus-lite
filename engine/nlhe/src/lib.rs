@@ -16,5 +16,7 @@ pub mod eval_lut;
 pub mod index;
 pub mod kmeans;
 pub mod ochs;
+pub mod potential;
 pub mod river_table;
 pub mod subgame;
+pub mod vsolve;
