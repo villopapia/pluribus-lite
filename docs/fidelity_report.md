@@ -76,6 +76,42 @@ with first-use allocation (380.6 GiB) lands under the paper's "less than 0.5 TB"
 | **disk for the HPC run** | keeping 2 checkpoints + one being written: 3 × 349 ≈ 1.05 TiB, + snapshots up to 650 GiB → **≈ 1.7 TiB peak** (keeping 3 checkpoints: ≈ 2.0 TiB) |
 | checkpoint write time | ≈ 6 min at 1 GB/s, ≈ 20 min at 300 MB/s (streamed; no extra RAM, verified) |
 
+### Derivation of 380.6 GiB (and why it is not 548 × 0.622 = 340.9)
+
+Per-street figures from `m2_estimate` for `faithful.cfg`. GiB = 2^30 bytes; regrets are i32 and
+the preflop average strategy is u32.
+
+| component | dense | first-use model | how |
+|---|---:|---:|---|
+| preflop regrets | 12.022 | 12.022 | 3,227,143,725 pairs × 4 B; **always allocated** (paper: round 1 allocated up front) |
+| preflop average strategy φ | 12.022 | 12.022 | same pairs × 4 B; only round 1 keeps φ |
+| flop regrets | 61.800 | 38.437 | 16,589,364,400 pairs × 4 B × 0.62196 |
+| turn regrets | 150.924 | 93.869 | 40,513,282,800 × 4 B × 0.62196 |
+| river regrets | 308.546 | 191.904 | 82,824,742,400 × 4 B × 0.62196 |
+| bucket tables (flop 24.8 MiB, turn 291.2 MiB) | 0.309 | 0.309 | river computed on the fly |
+| node index (8 B per decision node) | 2.539 | 2.539 | 340,738,096 nodes |
+| explicit betting tree (44 B per node, decision + terminal = 718,732,474) | — | 29.452 | not counted in the dense line |
+| **total** | **548.16** | **380.55** | |
+
+0.622 = 413,507,309 / 664,845,654, the share of action sequences Pluribus encountered (Supp
+p. 13). Multiplying the whole 548 GiB by 0.622 (= 340.9) is wrong for two reasons:
+1. The share applies **only to post-flop regrets** (521.27 GiB). Preflop regrets and φ (24.04),
+   tables (0.31) and the node index (2.54) are not lazily allocated.
+2. The first-use line **adds the explicit tree** (29.45 GiB), which the dense line leaves out.
+
+Check: 340.9 + 0.378 × 24.04 (unscaled preflop) + 0.378 × 2.85 (unscaled tables/index)
++ 29.45 (tree) = 380.5 GiB.
+
+### Disk with in-place snapshots and 2 checkpoints (decision 3; implementation pending)
+
+- **Old plan:** keep 3 checkpoints (+1 being written), with the snapshot file rewritten
+  (2× while rewriting): ≈ 1.7–2.0 TiB peak.
+- **New plan:**
+  - At most 2 checkpoint files at any moment: delete the oldest before writing a new one, so
+    one complete checkpoint always exists.
+  - The snapshot sum is updated in place, chunk by chunk.
+  - **Peak ≈ 2 × 349 + 326 + 0.3 ≈ 1,024 GiB = 1.0 TiB.**
+
 All memory and disk figures scale with the true allocation share, which is only known after a
 real run. Pluribus' share was 0.622; our short runs reach 0.08–0.69, depending on tree and
 length.

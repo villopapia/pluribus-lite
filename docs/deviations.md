@@ -74,6 +74,8 @@ Page numbers: Supp = supplement (printed pages), Main = Science 365:885–890.
 | D-RES-4 | pilot within 11 GiB | — | `pilot_dell_fit11.cfg`: pilot_dell with **63** post-flop buckets (10.93 GiB) | resource | coarser cards on every post-flop round | estimator; head-to-head vs pilot_dell at equal iterations if RAM allows | measured / open |
 | D-RES-5 | tree representation | not described | explicit tree, ~44 B per node incl. terminals (faithful: 718.7M nodes ≈ 29.5 GiB) | impl | memory | estimator | measured |
 
+| D-RUN-1 | **Dell long run (pilot only)** | 8 days, 64 cores, `faithful`-scale abstraction | `pilot_dell_fit11.cfg` (63 post-flop buckets from a dedicated k = 63 Johanson abstraction, `data/abstraction/j63`), 12 threads at below-normal priority, plan 16 days (23,040 min, so paper minute = 2 min), river on the fly. Started 2026-11-08 11:50 as pid 27816; details in `docs/HANDOFF.md` | resource / pilot | Not a fidelity result: reduced action set (D-RES-3) and buckets (D-RES-4). For pipeline validation and pilot-vs-faithful comparisons only | metrics.tsv; eval plan §1–2 | running |
+
 ## E. Toy-game reference solver (M1, not the blueprint)
 
 | id | item | paper | ours | reason |

@@ -31,6 +31,12 @@ The SHA-256 hashes identify the exact versions read.
 
 Main-paper page numbers are the journal's (885–890); Thesis page numbers are printed ones.
 
+**Our target hardware for the faithful run** (decision 2026-11-08): a **Stanage large-memory
+node** (University of Sheffield HPC, ~1 TB of RAM; 2 TB nodes also exist).
+- `faithful.cfg` needs ≈ 381 GiB with first-use allocation and ≈ 548 GiB dense
+  (`docs/fidelity_report.md` §3), so either node size fits.
+- The paper used one 64-core node with < 0.5 TB in use (Supp p. 11; Main p. 887).
+
 ## 1. Game (pp. 4–5)
 
 | item | paper | page |

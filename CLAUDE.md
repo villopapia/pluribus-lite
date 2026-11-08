@@ -38,6 +38,11 @@ original's strength is not a goal.
   checkpoint).
 - Long local jobs run at below-normal priority and never longer than 2 hours unattended.
 
+## Session handoff
+**Read `docs/HANDOFF.md` first**: running processes, recent decisions, open tasks, and
+half-finished work. Fidelity rules are in `docs/fidelity_spec.md` (published parameters) and
+`docs/deviations.md` (every difference). Fidelity to Pluribus is the top requirement.
+
 ## Commands
 - Engine tests: `cd engine && cargo test` (cargo is at `~/.cargo/bin`, not on PATH)
 - Python tests: `cd analysis && .venv/Scripts/python -m pytest -q tests`
