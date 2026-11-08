@@ -88,8 +88,15 @@ pub fn emd(x: &Hist, m: &Mean, ground: &[f32], c: usize, rem: &mut Vec<f32>) -> 
     rem.clear();
     rem.extend_from_slice(&m.mass);
     let n = x.idx.len();
-    let mut tgt = [0f32; 64];
-    tgt[..n].copy_from_slice(&x.w);
+    let mut small = [0f32; 64];
+    let mut big = Vec::new();
+    let tgt: &mut [f32] = if n <= 64 {
+        small[..n].copy_from_slice(&x.w);
+        &mut small[..n]
+    } else {
+        big.extend_from_slice(&x.w); // a mean taken as a point (Hamerly drift)
+        &mut big[..]
+    };
     let mut left = n;
     let mut cost = 0f32;
     for r in 0..q {

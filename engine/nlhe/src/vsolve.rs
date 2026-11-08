@@ -27,8 +27,8 @@ struct Block {
     sum: Vec<f64>,
 }
 
-pub struct VectorSolver<'a> {
-    pub g: &'a Subgame,
+pub struct VectorSolver {
+    pub g: Subgame,
     pub rules: Rules,
     pub board: Vec<u8>,
     pub ranges: [Vec<f64>; 2],
@@ -36,7 +36,7 @@ pub struct VectorSolver<'a> {
     pub frozen: HashMap<(u32, u16), Vec<f64>>,
     combos: Vec<(u8, u8)>,
     blocks: HashMap<u64, Block>,
-    ranks: HashMap<u64, Vec<u16>>,
+    ranks: HashMap<u64, (Vec<u16>, Vec<u16>)>,
     /// normaliser: total weight of card-compatible hand pairs at the root
     pub z: f64,
     pub iterations: u64,
@@ -46,8 +46,8 @@ fn mask(cards: &[u8]) -> u64 {
     cards.iter().fold(0u64, |m, &c| m | 1 << c)
 }
 
-impl<'a> VectorSolver<'a> {
-    pub fn new(g: &'a Subgame, rules: Rules, board: &[u8], ranges: [Vec<f64>; 2]) -> Self {
+impl VectorSolver {
+    pub fn new(g: Subgame, rules: Rules, board: &[u8], ranges: [Vec<f64>; 2]) -> Self {
         assert_eq!(rules.players, 2, "the vector solver is heads-up only");
         assert!(g.nodes.iter().all(|n| n.kind != Kind::Leaf), "subgames with leaves are not supported");
         let combos = combo_cards();
@@ -84,21 +84,26 @@ impl<'a> VectorSolver<'a> {
             .collect()
     }
 
-    fn ranks_for(&mut self, board: &[u8]) -> &Vec<u16> {
+    /// Hand ranks on a full board (0 = hand blocked by the board) and the unblocked hands sorted
+    /// by rank, cached per board.
+    fn ensure_ranks(&mut self, board: &[u8]) -> u64 {
         let key = mask(board);
-        let combos = &self.combos;
-        self.ranks.entry(key).or_insert_with(|| {
+        if !self.ranks.contains_key(&key) {
             let lut = Lut::get();
             let bh = LHand::of(board);
-            combos.iter().map(|&(a, b)| if key & mask(&[a, b]) != 0 { 0 } else { lut.class(bh.add(a).add(b)) + 1 }).collect()
-        })
+            let ranks: Vec<u16> = self.combos.iter().map(|&(a, b)| if key & mask(&[a, b]) != 0 { 0 } else { lut.class(bh.add(a).add(b)) + 1 }).collect();
+            let mut order: Vec<u16> = (0..COMBOS as u16).filter(|&h| ranks[h as usize] > 0).collect();
+            order.sort_by_key(|&h| ranks[h as usize]);
+            self.ranks.insert(key, (ranks, order));
+        }
+        key
     }
 
     /// Σ_o reach[o]·compat(h, o)·sign(rank h − rank o) on a full board, by a sweep.
     fn showdown(&mut self, board: &[u8], reach: &[f64]) -> Vec<f64> {
-        let ranks = self.ranks_for(board).clone();
-        let mut order: Vec<usize> = (0..COMBOS).filter(|&h| ranks[h] > 0).collect();
-        order.sort_by_key(|&h| ranks[h]);
+        let key = self.ensure_ranks(board);
+        let (ranks, order) = &self.ranks[&key];
+        let order: Vec<usize> = order.iter().map(|&h| h as usize).collect();
         let mut out = vec![0f64; COMBOS];
         // weaker: ascending sweep, groups of equal rank
         let (mut tot, mut per) = (0f64, [0f64; 52]);
@@ -322,6 +327,18 @@ impl<'a> VectorSolver<'a> {
         s[combo * n..(combo + 1) * n].to_vec()
     }
 
+    /// Strategy of every hand at (node, cards dealt since the root), row-major (n per hand),
+    /// with frozen entries applied.
+    pub fn strategy_all(&self, node: u32, later_cards: &[u8], avg: bool) -> Vec<f64> {
+        let n = self.g.nodes[node as usize].n as usize;
+        let mut b = self.board.clone();
+        b.extend_from_slice(later_cards);
+        let key = Self::key(node, &b, self.board.len());
+        let mut s = if avg { self.average(key, n) } else { self.current(key, n) };
+        self.apply_frozen(node, n, &mut s);
+        s
+    }
+
     /// Value for player `i` of a best response against the other's average (or final) strategy.
     pub fn best_response_value(&mut self, i: usize, avg: bool) -> f64 {
         let reach = self.ranges.clone();
@@ -360,7 +377,7 @@ mod tests {
         let g = Subgame::build(&rules, &cfg, river_root(&rules));
         let mut rng = Rng::new(4);
         let r: Vec<f64> = (0..COMBOS).map(|_| rng.next_f64()).collect();
-        let mut s = VectorSolver::new(&g, rules, &board, [r.clone(), r.clone()]);
+        let mut s = VectorSolver::new(g, rules, &board, [r.clone(), r.clone()]);
         let reach = s.ranges[1].clone();
         let sd = s.showdown(&board, &reach);
         let cs = s.compat_sums(&reach);
@@ -397,7 +414,7 @@ mod tests {
         let (mut r0, mut r1) = (vec![0.0; COMBOS], vec![0.0; COMBOS]);
         r0[combo_index(20, 1)] = 1.0; // 7-2 (BB acts first heads-up post-flop: seat 1)
         r1[combo_index(48, 49)] = 1.0; // aces
-        let mut s = VectorSolver::new(&g, rules, &board, [r0, r1]);
+        let mut s = VectorSolver::new(g, rules, &board, [r0, r1]);
         s.run(400);
         let br0 = s.best_response_value(0, true);
         let br1 = s.best_response_value(1, true);
@@ -411,7 +428,7 @@ mod tests {
         let mut rng = Rng::new(9);
         let r: Vec<f64> = (0..COMBOS).map(|_| rng.next_f64()).collect();
         let g = Subgame::build(&rules, &cfg, river_root(&rules));
-        let mut s = VectorSolver::new(&g, rules, &[2, 17, 30, 41, 51], [r.clone(), r.clone()]);
+        let mut s = VectorSolver::new(g, rules, &[2, 17, 30, 41, 51], [r.clone(), r.clone()]);
         s.run(20);
         let e1 = s.exploitability(true);
         s.run(280);
@@ -424,7 +441,7 @@ mod tests {
         t[1] = 500;
         let root = round_start(&rules, 2, t, 0);
         let g = Subgame::build(&rules, &cfg, root);
-        let mut s = VectorSolver::new(&g, rules, &[2, 17, 30, 41], [r.clone(), r]);
+        let mut s = VectorSolver::new(g, rules, &[2, 17, 30, 41], [r.clone(), r]);
         s.run(60);
         let e = s.exploitability(true);
         eprintln!("turn: exploitability {e:.3} after 60 iterations");
@@ -436,7 +453,7 @@ mod tests {
         let rules = Rules { players: 2, ..Rules::default() };
         let cfg = AbstractionConfig::parse("allin = true").unwrap();
         let g = Subgame::build(&rules, &cfg, river_root(&rules));
-        let mut s = VectorSolver::new(&g, rules, &[2, 17, 30, 41, 51], [vec![1.0; COMBOS], vec![1.0; COMBOS]]);
+        let mut s = VectorSolver::new(g, rules, &[2, 17, 30, 41, 51], [vec![1.0; COMBOS], vec![1.0; COMBOS]]);
         let h = combo_index(48, 49);
         s.frozen.insert((0, h as u16), vec![0.25, 0.75]);
         s.run(50);

@@ -71,6 +71,15 @@ fn main() {
         t_full, fs.iterations, sse_full, rs.sse[rs.best], rs.sse[0]
     );
     if !only_turn_full {
+        // noise floor: one more independent restart (seed 25 of the same sequence) vs the best
+        let (kmi, _) = kmeans::fit(&feats, N_CLUSTERS, k, Metric::L2, 300, kmeans::restart_seed(seed, rr), threads);
+        let labi: Vec<u16> = (0..np).map(|i| kmi.nearest(&feats[i * N_CLUSTERS..(i + 1) * N_CLUSTERS]).0 as u16).collect();
+        println!(
+            "river noise floor: one independent fit vs full: within {:.6} ({:+.2}%), ARI {:.4}",
+            kmeans::within_sse(&feats, &kmi, threads) / np as f64,
+            100.0 * (kmeans::within_sse(&feats, &kmi, threads) / np as f64 / sse_full - 1.0),
+            ari(&labi, &lab_full)
+        );
         let t0 = Instant::now();
         let (km5, _, _) = kmeans::fit_restarts(&feats, N_CLUSTERS, k, Metric::L2, 300, seed, threads, 5);
         let lab5: Vec<u16> = (0..np).map(|i| km5.nearest(&feats[i * N_CLUSTERS..(i + 1) * N_CLUSTERS]).0 as u16).collect();
@@ -135,6 +144,7 @@ fn main() {
     let run = |name: &str, o: Options, restarts: usize, base: Option<&(Vec<u16>, f64, f64)>| -> (Vec<u16>, f64, f64) {
         let t0 = Instant::now();
         let mut best: Option<(Vec<u16>, f64)> = None;
+        let mut second: Option<(Vec<u16>, f64)> = None;
         let mut evals = 0u64;
         let mut its = Vec::new();
         let mut scores = Vec::new();
@@ -145,13 +155,19 @@ fn main() {
             let w = within_emd(&pts, &lab, k, &ground, c, o.threads);
             scores.push(w);
             if best.as_ref().is_none_or(|b| w < b.1) {
+                second = best.take();
                 best = Some((lab, w));
+            } else if second.as_ref().is_none_or(|s| w < s.1) {
+                second = Some((lab, w));
             }
         }
         let secs = t0.elapsed().as_secs_f64();
         let (lab, w) = best.unwrap();
         match base {
-            None => println!("turn {name}: {secs:.1}s, {restarts} restarts, iterations {its:?}, EMD evals {evals}, within EMD {w:.5} (restarts {scores:.5?})"),
+            None => println!(
+                "turn {name}: {secs:.1}s, {restarts} restarts, iterations {its:?}, EMD evals {evals}, within EMD {w:.5} (restarts {scores:.5?}); noise floor: ARI best vs second-best restart {:.4}",
+                second.as_ref().map_or(f64::NAN, |s| ari(&lab, &s.0))
+            ),
             Some(b) => println!(
                 "turn {name}: {secs:.1}s ({:.1}x faster), iterations {its:?}, EMD evals {evals}, within EMD {w:.5} ({:+.2}% vs full), ARI vs full {:.4}",
                 b.2 / secs,
