@@ -21,3 +21,14 @@ Thumbs.db
 docs/*.pdf
 docs/papers/
 docs/sources/
+
+# Large binaries anywhere (checkpoints, snapshot sums, bucket tables, archives)
+ckpt_*.bin
+*.bin
+*.tmp
+*.tbl
+*.bkt
+*.ochs
+*.centroids
+*.zip
+STOP

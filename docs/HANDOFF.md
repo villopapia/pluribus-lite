@@ -18,6 +18,15 @@ deviation documented, justified and, where possible, measured.
   `j63_r1` (old single-fit j63, for comparison), legacy `m2_11g`, `k200`; runs, with discarded ones
   under `data/runs/discarded/`).
 
+## 0. Where work happens (from 2026-11-08)
+
+- **Development: the MSI** (clone of the private GitHub repo `villopapia/pluribus-lite`).
+  `data/`, `docs/papers/` and `docs/sources/` are not in git; copy or rebuild them there as
+  needed (abstractions are rebuilt by `build_abstraction` / `build_river_table`).
+- **The Dell: only the long run, its watchdog and monitoring.** No builds, benchmarks or tests
+  on the Dell while the run is going (they distort its speed and memory). Code changes reach the
+  Dell run only through an explicit stop / pull / build / restart.
+
 ## 2. Running background processes
 
 | what | PID | details |
@@ -68,7 +77,15 @@ close programs, delete STOP and start the task.
 2. **Sources:** `docs/sources_review.md`. Applied: D-INFO-1 restarts, D-ACT-7 test, docs. Still
    missing: the Reddit AMA (both the fetch tool and the Chrome extension block reddit.com; the user
    saves it manually).
-3. **Rebuild `j200` with 25 restarts** before any faithful (HPC) run.
+3. **Before any faithful (HPC) run, `j200` needs:** (a) the **25-restart rebuild**
+   (`build_abstraction --config nlhe/configs/faithful.cfg --out ../data/abstraction/j200
+   --restarts 25 --seed 1 --fit-boards 1000 --max-iters 300`, ≈ 10 min on 12 threads; move the
+   old `j200` aside first, since existing stage files are skipped), and (b) the **precomputed OCHS
+   river table** (`build_river_table --abstraction-dir ../data/abstraction/j200`, ≈ 30 min,
+   2.62 GiB, self-checks 200,000 random samples). On HPC, use `--river-method precomputed_table
+   --river-table-mode ram` (2.56× faster than on the fly on the Dell benchmark;
+   `docs/fidelity_report.md`). Then re-benchmark on the node and set `planned_total_iterations`
+   for the HPC config (D-SCHED-2).
 4. **Evaluation** (`docs/eval_plan.md`): preflop log-likelihood, AIVAT, on Dell checkpoints.
 5. **Open deviation measurements** (status "open" in deviations.md), including the D-ALG-5 and
    D-ALG-9 ablations.
