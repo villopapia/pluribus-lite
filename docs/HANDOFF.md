@@ -12,7 +12,7 @@ deviation documented, justified and, where possible, measured.
 - Tests: 45 `cfr`, 72 `nlhe` unit, 5 `nlhe` config tests; 15 Python tests; all pass.
   `cd engine && cargo test --release` (cargo at `~/.cargo/bin`, not on PATH) and
   `cd analysis && .venv/Scripts/python -m pytest -q tests`.
-- Not in git, kept locally: `docs/papers/*.pdf`, `docs/sources/` copies are in git (web pages);
+- Not in git, kept locally: `docs/papers/*.pdf` and `docs/sources/*.md` (third-party texts; index with SHA-256 in `docs/sources_review.md`);
   `data/` (phh-dataset, parquet, `aay2400_data_file_s1.zip` + `s1/`, abstractions `j200`,
   `j63` (+ `river.tbl`, 2.62 GiB), legacy `m2_11g`, `k200`, runs).
 

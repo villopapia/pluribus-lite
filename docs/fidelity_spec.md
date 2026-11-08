@@ -32,6 +32,11 @@ The SHA-256 hashes identify the exact versions read.
 
 Main-paper page numbers are the journal's (885–890); Thesis page numbers are printed ones.
 
+**Extended sources (Phase A2, 2026-11-08):** Libratus, refs 23, 27, 33, 35, 42, 47, 48, 49, 52,
+the pruning papers, and the Meta / CMU announcements. Verified titles, URLs, SHA-256s and
+evidence levels are in `docs/sources_review.md` §1. They never override this spec: they inform
+the choices recorded in `deviations.md`.
+
 **Our target hardware for the faithful run** (decision 2026-11-08): a **Stanage large-memory
 node** (University of Sheffield HPC, ~1 TB of RAM; 2 TB nodes also exist).
 - `faithful.cfg` needs ≈ 381 GiB with first-use allocation and ≈ 548 GiB dense
