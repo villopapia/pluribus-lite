@@ -123,6 +123,25 @@ pub fn update_beliefs<P: Policy>(r: &mut [Vec<f64>; 2], prefix: &[Action], actio
     obs
 }
 
+/// Continuation strategy `k` of `blueprint` at the Leduc decision state `s`, over Leduc's legal
+/// actions: the biased distribution, or (`compress = Some(seed)`) its one sampled action.
+pub fn cont_probs<P: Policy>(blueprint: &P, s: &LeducState, k: usize, compress: Option<u64>) -> Vec<f64> {
+    let g = Leduc;
+    let acts = g.legal_actions(s);
+    let n = acts.len();
+    let key = g.infoset_key(s);
+    let mut probs = [0.0; MAX_ACTIONS];
+    blueprint.action_probs(key, n, &mut probs);
+    let kinds: Vec<ActKind> = acts.as_slice().iter().map(|&a| kind_of(a)).collect();
+    let mut b = vec![0.0; n];
+    bias(&probs[..n], &kinds, k, &mut b);
+    if let Some(seed) = compress {
+        let i = sample_fixed(seed, key, k, &b);
+        b.iter_mut().enumerate().for_each(|(j, x)| *x = (j == i) as u8 as f64);
+    }
+    b
+}
+
 /// Key of the public state at `s` (betting history and board rank), shared by both players.
 pub fn public_key(s: &LeducState) -> u64 {
     key_for(s, 0) >> 2
@@ -199,23 +218,8 @@ impl<'a, P: Policy> LeducSubgame<'a, P> {
             }
             NodeKind::Player(q) => {
                 let acts = g.legal_actions(s);
-                let n = acts.len();
-                let key = g.infoset_key(s);
-                let mut probs = [0.0; MAX_ACTIONS];
-                self.blueprint.action_probs(key, n, &mut probs);
-                let kinds: Vec<ActKind> = acts.as_slice().iter().map(|&a| kind_of(a)).collect();
-                let mut b = [0.0; MAX_ACTIONS];
-                bias(&probs[..n], &kinds, k[q] as usize, &mut b);
-                match self.compress {
-                    Some(seed) => {
-                        let i = sample_fixed(seed, key, k[q] as usize, &b[..n]);
-                        self.cont_value(&g.apply(s, acts.as_slice()[i]), k)
-                    }
-                    None => (0..n)
-                        .filter(|&i| b[i] > 0.0)
-                        .map(|i| b[i] * self.cont_value(&g.apply(s, acts.as_slice()[i]), k))
-                        .sum(),
-                }
+                let b = cont_probs(self.blueprint, s, k[q] as usize, self.compress);
+                (0..acts.len()).filter(|&i| b[i] > 0.0).map(|i| b[i] * self.cont_value(&g.apply(s, acts.as_slice()[i]), k)).sum()
             }
         }
     }

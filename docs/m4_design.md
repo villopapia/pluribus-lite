@@ -19,10 +19,10 @@ Bottom-up; each stage is tested on a game with a known answer before the next st
 | 1 | beliefs: a range over private hands per player, Bayes updates from σ | pp. 19–21 | `cfr/src/search.rs` (Bayes primitive), `nlhe/src/belief.rs` (1,326 combos), `cfr/src/leduc_subgame.rs` (Leduc) | **built** |
 | 2 | subgame: root at the start of the current round; leaf rules | p. 21 | `nlhe/src/subgame.rs`; Leduc in `leduc_subgame.rs` | **built** |
 | 3 | leaves: 4 continuation strategies, compressed, chosen per infoset | pp. 23–24 | `cfr/src/search.rs` (bias, compression), `nlhe/src/continuation.rs`, `leduc_subgame.rs` | **built** |
-| 4 | solvers: Monte Carlo Linear CFR or vector Linear CFR; play the final iterate, σ ← weighted average | pp. 21–22 | — | next |
-| 5 | Algorithm 2: nested search, freezing, off-tree opponent actions | pp. 22–23, 25 | — | |
+| 4 | solvers: Monte Carlo Linear CFR or vector Linear CFR; play the final iterate, σ ← weighted average | pp. 21–22 | `cfr/src/subgame_solve.rs` (Leduc) | **built (Leduc)**; NLHE solvers next |
+| 5 | Algorithm 2: nested search, freezing, off-tree opponent actions | pp. 22–23, 25 | `cfr/src/nested.rs` (Leduc) | **built (Leduc)**; NLHE wiring next |
 | 6 | preflop: search trigger, randomized pseudo-harmonic translation; deterministic mapping at leaves | pp. 15, 19, 24 | — | |
-| V | validation on Leduc (a) search with 4 continuations beats the blueprint; (b) blueprint-only leaves are worse | — | — | after 4–5 |
+| V | validation on Leduc (a) search with 4 continuations beats the blueprint; (b) blueprint-only leaves are worse | — | `cfr/src/bin/leduc_validate.rs` | **done**: (b) holds, (a) fails under the paper's settings (`docs/m4_validation.md`) |
 
 **Validation game.** Leduc hold'em (`cfr/src/leduc.rs`): 2 players, 2 rounds, exact best response
 in milliseconds (`cfr/src/br.rs`). Mapped onto the paper's rules: search on round 1 has leaves at
@@ -199,7 +199,19 @@ in M1); with blueprint-only leaves and no compression its value equals the full-
 "policy in round 1, blueprint after"; there are exactly 30 leaf-choice infosets (5 leaf public
 states × 3 ranks × 2 players); CFR on the depth-limited game drives its exploitability toward 0.
 
-## 4. Solvers (stage 4, design only)
+### Continuation seeds (D-SRCH-6)
+
+The compressed continuation strategies are a deterministic function of (seed, abstract infoset,
+strategy), so each blueprint gets one seed, fixed for every match played with it and logged by the
+search. Not stored in run configs (an unknown key would stop the Dell's older binary from
+resuming).
+
+| blueprint | seed | first used |
+|---|---:|---|
+| Leduc validation blueprints (MCCFR 2k / 20k / 200k, abstracted CFR 5k; `leduc_validate`) | 1 | 2026-11-08 |
+| NLHE `pilot_dell_fit11` (Dell long run) | to be assigned at first search use | — |
+
+## 4. Solvers (stage 4; built for Leduc, `cfr/src/subgame_solve.rs`)
 
 **Paper (pp. 21–22).** Large or early subgames: Monte Carlo Linear CFR "just as it was for the
 blueprint". Otherwise: "an optimized vector-based form of Linear CFR (38) that samples one set of
@@ -214,7 +226,7 @@ Linear CFR weights t. Leaf values need the expectation over hands, i.e. the roll
 hand (design detail for stage 4). (c) The switch rule is unpublished → D-SRCH-9. Search
 abstraction for later rounds (500 buckets, per-flop, potential-aware) stays D-INFO-6.
 
-## 5. Nested search (stage 5, design only) — Algorithm 2 (p. 25)
+## 5. Nested search (stage 5; built for Leduc, `cfr/src/nested.rs`) — Algorithm 2 (p. 25)
 
 ```
 I ← ∅;  G_root ← G(I);  σ ← σ_blueprint

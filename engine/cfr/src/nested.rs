@@ -24,8 +24,8 @@
 //! public history ([`Agent::act`]); [`agent_policy`] tabulates it for exact best response.
 
 use crate::game::{Action, Game, NodeKind, MAX_ACTIONS};
-use crate::leduc::{Leduc, LeducState, RAISE};
-use crate::leduc_subgame::{public_key, replay, update_beliefs, LeducSubgame};
+use crate::leduc::{key_for, Leduc, LeducState, RAISE};
+use crate::leduc_subgame::{cont_probs, public_key, replay, update_beliefs, LeducSubgame, LEAF_TAG};
 use crate::subgame_solve::{solve, Solution, Solver};
 use crate::table::{Policy, TabularPolicy};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +44,12 @@ pub struct SearchConfig {
     pub late: Solver,
     /// search abstraction without re-raises (exercises off-tree actions)
     pub no_reraise: bool,
+    /// diagnostic, not the paper: play the weighted average instead of the final iteration
+    pub play_average: bool,
+    /// diagnostic, not the paper: with `search_round1 = false`, play round 2 by the continuation
+    /// strategy chosen at the round-1 leaf (mixture → behaviour strategy by Bayes over our own
+    /// round-2 actions), so round 1 is played as the depth-limited solution assumed
+    pub follow_continuation: bool,
 }
 
 /// σ seen by the belief update: frozen infosets, then the latest search's average, then the
@@ -160,6 +166,10 @@ impl<'a> Agent<'a> {
         if self.cfg.search_round0 {
             current = Some(self.search(&root, &ranges, &frozen, &added));
         }
+        // for `follow_continuation`: the round-1 leaf state with the search in force there, and
+        // our round-2 decisions so far
+        let mut leaf: Option<(LeducState, Option<Rc<Solution>>)> = None;
+        let mut own_r2: Vec<(LeducState, Action)> = Vec::new();
         let mut s = g.apply(&g.apply(&g.root(), cards[0]), cards[1]);
         for (idx, &a) in public.iter().enumerate() {
             match g.kind(&s) {
@@ -168,6 +178,7 @@ impl<'a> Agent<'a> {
                     let view = SigmaView { frozen: &frozen, avg: current.as_ref().map(|c| &c.avg), bp: self.bp };
                     let obs = update_beliefs(&mut ranges, &public[..round_start], &public[round_start..=idx], &view);
                     self.zero_prob_events += obs.iter().filter(|&&o| o == 0.0).count() as u64;
+                    leaf = Some((s, current.clone()));
                     s = g.apply(&s, a);
                     root = public[..=idx].to_vec();
                     round_start = idx + 1;
@@ -176,6 +187,9 @@ impl<'a> Agent<'a> {
                     current = if self.cfg.search_round1 { Some(self.search(&root, &ranges, &frozen, &added)) } else { None };
                 }
                 NodeKind::Player(p) => {
+                    if p == seat && s.round == 1 {
+                        own_r2.push((s, a));
+                    }
                     if p == seat {
                         // OurTurn: freeze σ(I) for our actual hand
                         let sig: &dyn Policy = match &current {
@@ -204,10 +218,37 @@ impl<'a> Agent<'a> {
         let mut out = vec![0.0; full];
         match &current {
             Some(c) => {
-                let v = self.over_abstraction(&c.play, &s, &added);
+                let v = self.over_abstraction(if self.cfg.play_average { &c.avg } else { &c.play }, &s, &added);
                 pad(&v, full, &mut out);
             }
-            None => self.bp.action_probs(g.infoset_key(&s), full, &mut out),
+            None => match &leaf {
+                Some((ls, Some(r1))) if self.cfg.follow_continuation => {
+                    // mixture over continuations chosen at the leaf, conditioned on our own
+                    // round-2 actions so far (Kuhn: mixed → behaviour strategy)
+                    let nc = self.cfg.n_cont;
+                    let lkey = LEAF_TAG | key_for(ls, seat) << 1 | seat as u64;
+                    let pol = if self.cfg.play_average { &r1.avg } else { &r1.play };
+                    let mut prior = vec![0.0; nc];
+                    pol.action_probs(lkey, nc, &mut prior);
+                    let mut w = prior.clone();
+                    for (st, a) in &own_r2 {
+                        let i = g.legal_actions(st).as_slice().iter().position(|x| x == a).unwrap();
+                        for (k, wk) in w.iter_mut().enumerate() {
+                            *wk *= cont_probs(self.bp, st, k, self.cfg.compress)[i];
+                        }
+                    }
+                    if w.iter().sum::<f64>() == 0.0 {
+                        w = prior; // a path our own continuations never take: any choice is fine
+                    }
+                    let z: f64 = w.iter().sum();
+                    for (k, wk) in w.iter().enumerate() {
+                        for (o, p) in out.iter_mut().zip(cont_probs(self.bp, &s, k, self.cfg.compress)) {
+                            *o += wk / z * p;
+                        }
+                    }
+                }
+                _ => self.bp.action_probs(g.infoset_key(&s), full, &mut out),
+            },
         }
         out
     }
@@ -276,7 +317,7 @@ mod tests {
 
     fn cfg(search_round0: bool, no_reraise: bool) -> SearchConfig {
         let v = Solver::Vector { iters: 300, seed: 1 };
-        SearchConfig { n_cont: 4, compress: Some(1), search_round0, search_round1: true, early: v, late: v, no_reraise }
+        SearchConfig { n_cont: 4, compress: Some(1), search_round0, search_round1: true, early: v, late: v, no_reraise, play_average: false, follow_continuation: false }
     }
 
     fn close(a: &[f64], b: &[f64]) {
@@ -341,6 +382,21 @@ mod tests {
         let mut ag = Agent::new(&bp, cfg(false, false));
         ag.act(0, 4, &[CALL, RAISE, CALL, 2]);
         assert_eq!(ag.zero_prob_events, 1);
+    }
+
+    #[test]
+    fn following_the_blueprint_continuation_plays_the_compressed_blueprint() {
+        // one continuation (the blueprint): on round 2 the agent plays its compressed form
+        let bp = blueprint();
+        let mut c = cfg(true, false);
+        c.n_cont = 1;
+        c.search_round1 = false;
+        c.follow_continuation = true;
+        let mut ag = Agent::new(&bp, c);
+        let public = [CALL, CALL, 2];
+        let mut s = replay(&public, 4, 0);
+        s.cards[0] = 4;
+        close(&ag.act(0, 4, &public), &cont_probs(&bp, &s, 0, Some(1)));
     }
 
     #[test]

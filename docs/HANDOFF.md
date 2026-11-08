@@ -10,7 +10,7 @@ deviation documented, justified and, where possible, measured.
 - Repository: Dell `C:\Users\User\pluribus-lite` (training), MSI
   `C:\Users\chris\Desktop\pluribus-lite` (development); branch `main`; `git log -1` shows the latest
   commit. Tags: `m0`, `m1-prelim`, `m1-prelim2`, `m2-design`.
-- Tests: 56 `cfr`, 86 `nlhe` unit, 5 `nlhe` config tests; 15 Python tests; all pass (2026-11-08, MSI).
+- Tests: 65 `cfr`, 87 `nlhe` unit, 5 `nlhe` config tests; 17 Python tests; all pass (2026-11-08, MSI).
   `cd engine && cargo test --release` (cargo at `~/.cargo/bin`, not on PATH) and
   `cd analysis && .venv/Scripts/python -m pytest -q tests`.
 - Not in git, kept locally: `docs/papers/*.pdf` and `docs/sources/*.md` (third-party texts; index with SHA-256 in `docs/sources_review.md`);
@@ -90,9 +90,13 @@ close programs, delete STOP and start the task.
 4. **Evaluation** (`docs/eval_plan.md`): preflop log-likelihood, AIVAT, on Dell checkpoints.
 5. **Open deviation measurements** (status "open" in deviations.md), including the D-ALG-5 and
    D-ALG-9 ablations.
-6. **M4 search** per `fidelity_spec.md` §4 and `docs/m4_design.md`: stages 1–3 (beliefs, subgame + leaf rules,
-   continuation strategies) built and tested on the MSI 2026-11-08; ledger `deviations.md` §G (D-SRCH-1..10).
-   Next: stage 4 (solvers), then 5 (Algorithm 2), 6 (preflop translation), then the Leduc validation.
+6. **M4 search** per `fidelity_spec.md` §4, `docs/m4_design.md`, ledger `deviations.md` §G (D-SRCH-1..13).
+   Built on the MSI 2026-11-08: stages 1–3 (NLHE + Leduc), search raise sizes calibrated to 100–2,000
+   sequences (D-SRCH-3, `configs/search_root.cfg` + `search_later.cfg`), stages 4–5 for **Leduc**
+   (solvers, Algorithm 2). **Leduc validation done** (`docs/m4_validation.md`): (b) holds, (a) fails
+   under the paper settings (compression + final-iteration play + unsafe search in a tiny game).
+   Next: NLHE solvers and Algorithm 2 on the NLHE subgame (needs a small NLHE blueprint), stage 6
+   (preflop translation; preflop subgame size still open), D-INFO-6 per `docs/m4_info6_plan.md`.
 7. Housekeeping: delete legacy abstractions `m2_11g`, `k200` if not needed.
 8. ~~Pin the Dell's Python env~~ **Closed:** both machines pinned, verified 2026-11-08 (Dell
    `pip freeze` identical to `analysis/requirements.lock`, 19 packages). The interpreters differ
