@@ -2,7 +2,7 @@
 
 Every parameter of the blueprint and of real-time search stated in the supplementary
 materials of Brown & Sandholm, *Superhuman AI for multiplayer poker*, Science 365 (2019),
-DOI 10.1126/science.aay2400 (local copy `docs/19-Science-Superhuman_Supp.pdf`, not committed).
+DOI 10.1126/science.aay2400 (local copy `docs/papers/19-Science-Superhuman_Supp.pdf`, not committed), plus the main paper, the thesis and the cited method papers (section 0).
 
 **Page convention:** "p. N" is the page number printed in the supplement's footer. The PDF
 page is N + 1, because the cover page is unnumbered. Bracketed numbers [26] etc. are the
@@ -10,6 +10,26 @@ supplement's reference list.
 
 Where the supplement is silent, the entry says so explicitly. Our choices for those gaps are
 recorded in `docs/deviations.md`, never here.
+
+## 0. Sources
+
+All files are in `docs/papers/` (gitignored, not redistributed; re-download from the URLs).
+The SHA-256 hashes identify the exact versions read.
+
+| short name | document | URL | status | SHA-256 (first 16) |
+|---|---|---|---|---|
+| **Supp** | Brown & Sandholm, *Superhuman AI for multiplayer poker*, Science 2019, Supplementary Materials | noambrown.github.io/papers/19-Science-Superhuman_Supp.pdf | read in full | c135897c574faad6 |
+| **Main** | same paper, Science 365:885–890 (30 Aug 2019) | noambrown.github.io/papers/19-Science-Superhuman.pdf | read: method, compute, evaluation sections | 04e3d2bf9baf601f |
+| **Thesis** | N. Brown, *Equilibrium Finding for Large Adversarial Imperfect-Information Games*, CMU-CS-20-132, Sept 2020 | reports-archive.adm.cs.cmu.edu/anon/2020/CMU-CS-20-132.pdf | §6.6 "Pluribus" (pp. 189–192) read; restates Main/Supp, adds p-values 0.028 (5H+1AI) and 0.014 (1H+5AI); no new blueprint or search parameters found | cfc996da41ba583b |
+| [26] | Johanson, Burch, Valenzano, Bowling, *Evaluating state-space abstractions in extensive-form games*, AAMAS 2013 | ifaamas.org/Proceedings/aamas2013/docs/p271.pdf | read: features (§ hand-strength histograms + EMD, OCHS, Table 1) | f5b3b85043e40e66 |
+| [38] | Brown & Sandholm, *Solving imperfect-information games via discounted regret minimization*, AAAI 2019 | arxiv.org/pdf/1809.04040 | downloaded (Linear/Discounted CFR) | b28b1f66afd97846 |
+| [41] | Brown, Sandholm, Amos, *Depth-limited solving for imperfect-information games*, NeurIPS 2018 | arxiv.org/pdf/1805.08195 | downloaded (M4) | 27a09b43ece36828 |
+| [39] | Ganzfried & Sandholm, *Action translation in extensive-form games with large action spaces*, IJCAI 2013 | ijcai.org/Proceedings/13/Papers/028.pdf | downloaded (pseudo-harmonic mapping, M4) | 4e19eb49de125179 |
+| [28] | Brown, Ganzfried, Sandholm, *Hierarchical abstraction, distributed equilibrium computation, and post-processing...*, AAMAS 2015 | ifaamas.org/Proceedings/aamas2015/aamas/p7.pdf | downloaded (search abstraction, M4) | daa6a8116d89df6c |
+| [44] | Burch, Schmid, Moravčík, Morrill, Bowling, *AIVAT*, AAAI 2018 | arxiv.org/pdf/1612.06915 | downloaded (evaluation) | b40e9d02e86a5dfc |
+| **Data S1** | original hand logs (Supp "Data File S1 as zipped archive") | science.org supplementary files | **not retrieved**: every URL returns a Cloudflare challenge (HTTP 403) to automated clients. Needs a manual browser download. The hand-by-hand cross-check is pending (deviations D-DATA-1) | — |
+
+Main-paper page numbers are the journal's (885–890); Thesis page numbers are printed ones.
 
 ## 1. Game (pp. 4–5)
 
@@ -66,11 +86,21 @@ recorded in `docs/deviations.md`, never here.
 | P_i not in hand | traversal continues through the remaining tree; P_i's utility is unaffected | Alg. 1 TRAVERSE lines 19–20 |
 | final strategy (round 1) | φ normalised | Alg. 1 header |
 | hardware | one **64-core** shared-memory node (four 16-core Intel Xeon E5-8860 v3), 3 TB available, **less than 0.5 TB used** | 11 |
-| run length | **not in the supplement** (the main paper reports ~8 days / ~12,400 core-hours; not re-verified here) | — |
+| run length and compute | **8 days on a 64-core server, 12,400 CPU core hours, < 512 GB of memory**, about $144 at 2019 cloud spot rates | Main p. 887; Thesis p. 189 |
+| why the abstraction is that size | "We set the size of the blueprint strategy abstraction to allow Pluribus to run during live play on a machine with no more than 128 GB of memory while storing a compressed form of the blueprint strategy in memory" | Main p. 888 |
 | number of iterations | not published | — |
 | parallelism / locking | not published | — |
 
 ## 4. Real-time search (M4 specification)
+
+**Main-paper facts about search:**
+- Search time per subgame is **1–33 s**, depending on the situation.
+- Pluribus plays about **20 s per hand** in self-play.
+- Live play runs on two Intel Haswell E5-2695 v3 CPUs (28 cores) with **< 128 GB** of memory.
+- Opponent bets slightly off the tree on round 1 are rounded to a nearby size with the
+  pseudo-harmonic mapping [39].
+
+(Main pp. 888–889)
 
 ### 4.1 When search is used (pp. 15, 19)
 
@@ -145,8 +175,15 @@ recorded in `docs/deviations.md`, never here.
 4. **CheckNewRound:** if the betting round of G(I) is later than that of G_root, set
    G_root = G(I) and σ = Search(G_root).
 
-### 4.8 Evaluation (pp. 7–9)
+### 4.8 Evaluation (Supp pp. 7–9; Main p. 889; Thesis pp. 191–192)
 
-- AIVAT-based variance reduction, adapted to more than two players (p. 8): our M4
-  evaluation target.
-- The details are in pp. 7–9 and are to be specified in the M4 evaluation plan.
+| item | paper |
+|---|---|
+| unit | mbb/game (milli big blinds per hand) |
+| variance reduction | AIVAT [44], adapted to more than two players |
+| significance | 95% confidence, **one-tailed t-test** that Pluribus is profitable |
+| 5H+1AI | 10,000 hands over 12 days; **48 mbb/game, s.e. 25** (p = 0.028) |
+| 1H+5AI | 10,000 hands (5,000 each human); **32 mbb/game, s.e. 15** (p = 0.014) |
+| training data | the strategy came "entirely from self-play without any human data" (Thesis p. 192) |
+
+Our evaluation plan is in `docs/eval_plan.md`.
