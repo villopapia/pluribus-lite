@@ -69,3 +69,10 @@ fn pilot_fit11_fits_with_first_use_allocation() {
     let gib = estimate(&counts, &p, &m).total_gib();
     assert!(gib <= 11.0 && gib > 9.0, "{gib:.2} GiB");
 }
+
+/// D-SCHED-2: the Dell pilot has an explicit plan; the faithful config leaves it to the run.
+#[test]
+fn run_plan_is_explicit_for_the_dell_pilot() {
+    assert_eq!(load("pilot_dell_fit11.cfg").planned_total_iterations, Some(83_518_000_000));
+    assert_eq!(load("faithful.cfg").planned_total_iterations, None);
+}

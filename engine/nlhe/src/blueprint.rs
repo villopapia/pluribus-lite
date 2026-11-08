@@ -1033,6 +1033,19 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
     })
 }
 
+/// Delete-before-write checkpoint retention: which existing checkpoints (iteration, path) to
+/// delete before writing the one for iteration `new_t`, so that with it at most `keep` (>= 2)
+/// exist. Always the **oldest** (lowest iteration); the newest complete checkpoint is never
+/// chosen, so one valid checkpoint exists while the new one is written (to a .tmp, renamed
+/// when complete). An existing file for `new_t` itself is not counted (it is overwritten).
+pub fn retention_victims(existing: &[(u64, std::path::PathBuf)], new_t: u64, keep: usize) -> Vec<std::path::PathBuf> {
+    assert!(keep >= 2, "keep >= 2: one complete checkpoint while writing");
+    let mut v: Vec<&(u64, std::path::PathBuf)> = existing.iter().filter(|(t, _)| *t != new_t).collect();
+    v.sort();
+    let excess = (v.len() + 1).saturating_sub(keep);
+    v[..excess].iter().map(|(_, p)| p.clone()).collect()
+}
+
 // ------------------------------------------------------------------ post-flop snapshots
 
 const SNAP_MAGIC: &[u8; 4] = b"PLS3";
@@ -1861,6 +1874,27 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(entries.len(), 1, "no temporary copy");
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn retention_deletes_only_the_oldest_and_keeps_a_complete_checkpoint() {
+        let c = |ts: &[u64]| ts.iter().map(|&t| (t, std::path::PathBuf::from(format!("ckpt_{t:012}.bin")))).collect::<Vec<_>>();
+        let p = |t: u64| std::path::PathBuf::from(format!("ckpt_{t:012}.bin"));
+        // keep 2: before writing 300 with {100, 200} present, delete 100 only (200 stays valid)
+        assert_eq!(retention_victims(&c(&[200, 100]), 300, 2), vec![p(100)]);
+        // one existing: nothing deleted
+        assert_eq!(retention_victims(&c(&[100]), 200, 2), Vec::<std::path::PathBuf>::new());
+        // leftovers above the limit: all but the newest go, oldest first
+        assert_eq!(retention_victims(&c(&[30, 10, 20, 40]), 50, 2), vec![p(10), p(20), p(30)]);
+        // keep 3
+        assert_eq!(retention_victims(&c(&[10, 20, 30]), 40, 3), vec![p(10)]);
+        // never the newest complete one, for any history
+        for n in 1..6u64 {
+            let ex = c(&(1..=n).map(|k| k * 10).collect::<Vec<_>>());
+            let v = retention_victims(&ex, 1000, 2);
+            assert!(!v.contains(&p(n * 10)));
+            assert_eq!(ex.len() - v.len(), 1);
+        }
     }
 
     #[test]

@@ -42,6 +42,11 @@ pub struct AbstractionConfig {
     /// Post-flop, with at least this many players in the hand, no sized bets (check / call /
     /// fold / all-in only). 0 = off.
     pub crowded_players: u8,
+    /// Run planning (not part of the game): total iterations of the planned run. When set,
+    /// the trainer skips the warm-up rate measurement and schedules the paper's events as
+    /// fractions of this number from t = 0 (docs/deviations.md D-SCHED-2). Set from a
+    /// benchmark on an idle machine.
+    pub planned_total_iterations: Option<u64>,
     /// How river buckets are obtained at training time.
     pub river_method: RiverMethod,
 }
@@ -114,6 +119,7 @@ impl AbstractionConfig {
             avg_strategy_streets: [true, false, false, false],
             limp: Limp::All,
             crowded_players: 0,
+            planned_total_iterations: None,
             river_method: RiverMethod::OnTheFly,
         };
         for (ln, raw) in text.lines().enumerate() {
@@ -145,6 +151,10 @@ impl AbstractionConfig {
                             )))
                         }
                     }
+                }
+                "planned_total_iterations" => {
+                    c.planned_total_iterations =
+                        Some(v.replace('_', "").parse().map_err(|_| ConfigError(format!("planned_total_iterations: {v:?}")))?)
                 }
                 "crowded_players" => {
                     c.crowded_players = v.parse().map_err(|_| ConfigError(format!("crowded_players: {v:?}")))?

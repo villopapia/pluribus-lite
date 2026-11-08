@@ -1,4 +1,5 @@
-# Launcher for the Dell pilot long run (docs/HANDOFF.md §2). Windows-only operational script;
+# Launcher for the Dell pilot long run (docs/HANDOFF.md §2). The run ends when the config's
+# planned_total_iterations are done (--minutes 46080 is only a safety cap of 2x the plan). Windows-only operational script;
 # the trainer itself stays std-only Rust.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File scripts\windows\run_pilot.ps1 [-UpdateBinary]
@@ -46,8 +47,8 @@ if ($UpdateBinary -or -not (Test-Path $exe)) {
 }
 
 $args_ = "--config nlhe/configs/pilot_dell_fit11.cfg --abstraction-dir ../data/abstraction/j63 --buckets 63 " +
-         "--run-dir ../data/runs/pilot_fit11_long --threads 12 --minutes 23040 --plan-minutes 23040 " +
-         "--warmup-minutes 10 --checkpoint-minutes 120 --keep-checkpoints 2 --log-seconds 300 " +
+         "--run-dir ../data/runs/pilot_fit11_long --threads 12 --minutes 46080 --plan-minutes 23040 " +
+         "--checkpoint-minutes 120 --keep-checkpoints 2 --log-seconds 300 " +
          "--stop-file ../data/runs/pilot_fit11_long/STOP"
 # cmd does the redirection (append); paths contain no spaces.
 $cmdline = "/c $exe $args_ >> $run\train.log 2>> $run\train.err"

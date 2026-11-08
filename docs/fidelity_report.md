@@ -102,19 +102,51 @@ p. 13). Multiplying the whole 548 GiB by 0.622 (= 340.9) is wrong for two reason
 Check: 340.9 + 0.378 × 24.04 (unscaled preflop) + 0.378 × 2.85 (unscaled tables/index)
 + 29.45 (tree) = 380.5 GiB.
 
-### Disk with in-place snapshots and 2 checkpoints (decision 3; implementation pending)
+### Disk with in-place snapshots and 2 checkpoints (implemented 2026-11-08)
 
-- **Old plan:** keep 3 checkpoints (+1 being written), with the snapshot file rewritten
-  (2× while rewriting): ≈ 1.7–2.0 TiB peak.
-- **New plan:**
-  - At most 2 checkpoint files at any moment: delete the oldest before writing a new one, so
-    one complete checkpoint always exists.
-  - The snapshot sum is updated in place, chunk by chunk.
-  - **Peak ≈ 2 × 349 + 326 + 0.3 ≈ 1,024 GiB = 1.0 TiB.**
+What is now in the code:
+- **Checkpoints:** delete-before-write retention. `--keep-checkpoints K` (K ≥ 2) counts the
+  file being written, so at most K files exist at any moment and one complete checkpoint
+  always exists (also deletes leftover `ckpt_*.tmp`). If the newest checkpoint is
+  unreadable, the trainer resumes from the next older one.
+- **Snapshots:** file format PLS3, updated in place in 64 MiB chunks; no second copy
+  (`docs/deviations.md` D-ALG-6). Tests check this, including the crash cases.
+
+HPC disk peak for `faithful.cfg` (first-use share 0.622, GiB = 2^30 B), with K = 2:
+
+| item | GiB | how |
+|---|---:|---|
+| checkpoint (one file) | ≈ 349 | preflop regrets 12.02 + φ 12.02 + post-flop regrets 324.21 + 4 B node id per allocated block |
+| 2 checkpoints (one complete, one being written) | ≈ 698 | |
+| snapshot sum file | ≈ 327 | post-flop sums 324.21 (u32, same count as allocated regrets) + 16 B record header × ≤ 212M allocated post-flop decision nodes (≤ 3.2) |
+| abstraction (flop + turn tables) | 0.3 | |
+| precomputed river table (if used) | 2.6 | `river.tbl` |
+| **peak** | **≈ 1,028 GiB ≈ 1.00 TiB** | |
+
+For comparison, the old I/O (3 checkpoints + 1 in flight; snapshot rewritten to a second
+file) peaked at ≈ 4 × 349 + 2 × 327 ≈ 2,050 GiB ≈ 2.0 TiB.
 
 All memory and disk figures scale with the true allocation share, which is only known after a
 real run. Pluribus' share was 0.622; our short runs reach 0.08–0.69, depending on tree and
 length.
+
+### River bucket method: benchmark (2026-11-08, Dell idle)
+
+`train_blueprint --bench-seconds 300`, `pilot_dell_fit11.cfg`, `j63`, 12 threads, each from the
+same seeded fresh state; table built by `build_river_table` in 1,783 s (0 mismatches against
+on-the-fly OCHS on 200,000 random (hole, board) samples; payload FNV 1c4164a52647b183).
+
+| method | it/s | river share of traversal time | extra RAM |
+|---|---:|---:|---:|
+| on the fly (OCHS + nearest centroid) | 60,415 | 63.1% | 0 |
+| table, file (positioned reads), cold cache | 25,610 | 85.7% | page cache |
+| table, file, warm cache | 31,076 | 82.6% | page cache |
+| table in RAM | **154,361** | 4.7% | +2.62 GiB resident |
+
+**Chosen for the Dell run: on the fly.** The in-RAM table is 2.56× faster, but the trainer heads
+for ≈ 10.9 GiB on a machine with ~5.7 GB available, so +2.62 GiB would consume the watchdog
+margin; file mode is slower than on the fly (one system call per deal costs more than it
+saves). On an HPC node with free memory the in-RAM table is the clear choice.
 
 ### Pilot configs
 

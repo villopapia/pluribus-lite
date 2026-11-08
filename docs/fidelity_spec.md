@@ -27,7 +27,8 @@ The SHA-256 hashes identify the exact versions read.
 | [39] | Ganzfried & Sandholm, *Action translation in extensive-form games with large action spaces*, IJCAI 2013 | ijcai.org/Proceedings/13/Papers/028.pdf | downloaded (pseudo-harmonic mapping, M4) | 4e19eb49de125179 |
 | [28] | Brown, Ganzfried, Sandholm, *Hierarchical abstraction, distributed equilibrium computation, and post-processing...*, AAMAS 2015 | ifaamas.org/Proceedings/aamas2015/aamas/p7.pdf | downloaded (search abstraction, M4) | daa6a8116d89df6c |
 | [44] | Burch, Schmid, Moravčík, Morrill, Bowling, *AIVAT*, AAAI 2018 | arxiv.org/pdf/1612.06915 | downloaded (evaluation) | b40e9d02e86a5dfc |
-| **Data S1** | original hand logs (Supp "Data File S1 as zipped archive") | science.org supplementary files | **not retrieved**: every URL returns a Cloudflare challenge (HTTP 403) to automated clients. Needs a manual browser download. The hand-by-hand cross-check is pending (deviations D-DATA-1) | — |
+| **Data S1** | original hand logs (Supp "Data File S1 as zipped archive"), `data/aay2400_data_file_s1.zip` | science.org supplementary files (downloaded manually by the user) | read in full: 10,000 hands of 5H+1AI in ACPC format; **identical to the PHH conversion in all 10,000 hands** (`docs/s1_crosscheck.md`) | f1afeea99645f96d |
+| **Supp (Science copy)** | the supplement as served by Science, `docs/papers/aay2400-brown-sm.pdf` | science.org (supplied by the user) | **byte-identical to the author's copy** (same SHA-256), so the same version and text | c135897c574faad6 |
 
 Main-paper page numbers are the journal's (885–890); Thesis page numbers are printed ones.
 

@@ -146,6 +146,26 @@ fn planned_of(s: &Schedule) -> Option<u64> {
     (s.lcfr_until > 0 && s.prune_after != u64::MAX).then(|| s.discount_every * 1_152)
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// "YYYY-MM-DD HH:MM" (UTC) from Unix seconds (civil-from-days, H. Hinnant).
+fn utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let (h, m) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + (mo <= 2) as i64;
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
+}
+
 fn checkpoints(dir: &Path) -> Vec<(u64, PathBuf)> {
     let mut v: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
         .map(|rd| {
@@ -233,12 +253,30 @@ fn main() {
             t0.elapsed().as_secs_f64()
         );
         (m.iteration, m.elapsed_secs, m.sched, m.seed, m.snapshots, warm)
+    } else if let Some(p) = cfg.planned_total_iterations {
+        // explicit plan (D-SCHED-2): no warm-up measurement; the paper's schedule from t = 0
+        let s = Schedule::pluribus_scaled(p, a.strategy_interval);
+        let txt = format!(
+            "planned_total_iterations = {p} (explicit, from the run config; no warm-up calibration)
+planned: {} min -> planned rate {:.0} it/s; paper minute = {:.0} iterations
+schedule: {s:?}
+",
+            a.plan_minutes.unwrap_or(a.minutes),
+            p as f64 / (a.plan_minutes.unwrap_or(a.minutes) * 60.0),
+            p as f64 / 11_520.0
+        );
+        print!("{txt}");
+        if a.bench_seconds.is_none() {
+            std::fs::write(a.run_dir.join("schedule.txt"), txt).unwrap();
+        }
+        (0, 0.0, s, a.seed, 0, false)
     } else {
         (0, 0.0, Schedule::warmup(a.strategy_interval), a.seed, 0, true)
     };
+    let planned_total = cfg.planned_total_iterations;
     {
         let before = (sched.avg_start, sched.prune_exempt_fold, sched.prune_exempt_runout);
-        let planned = planned_of(&sched);
+        let planned = planned_total.or_else(|| planned_of(&sched));
         apply_flags(&mut sched, &a, planned);
         println!(
             "flags: phi start iteration {} (paper minute {}), prune exempt fold {}, run-out {}{}",
@@ -306,6 +344,9 @@ fn main() {
     }
 
     let wall0 = Instant::now();
+    const PROGRESS_SECS: f64 = 6.0 * 3600.0;
+    let prog_t0 = t;
+    let mut prog_last = (Instant::now(), t);
     let mut last_ckpt = Instant::now();
     let mut interval = ThreadStats::default();
     let mut total = ThreadStats::default();
@@ -327,12 +368,9 @@ fn main() {
                 }
             }
         }
-        let all: Vec<_> = checkpoints(&a.run_dir).into_iter().filter(|(_, q)| *q != p).collect();
-        if all.len() >= a.keep_checkpoints {
-            for (_, old) in &all[..all.len() + 1 - a.keep_checkpoints] {
-                if std::fs::remove_file(old).is_ok() {
-                    println!("removed old checkpoint {}", old.display());
-                }
+        for old in retention_victims(&checkpoints(&a.run_dir), t, a.keep_checkpoints) {
+            if std::fs::remove_file(&old).is_ok() {
+                println!("removed old checkpoint {}", old.display());
             }
         }
         let t0 = Instant::now();
@@ -343,6 +381,9 @@ fn main() {
     loop {
         // next epoch end: chunk, next discount, next snapshot
         let mut to = t + chunk;
+        if let Some(p) = planned_total {
+            to = to.min(p.max(t + 1));
+        }
         if !in_warmup {
             if let Some(d) = sched.next_discount(t) {
                 to = to.min(d);
@@ -409,7 +450,35 @@ fn main() {
 
         let stop_req = a.stop_file.as_ref().is_some_and(|p| p.exists());
         let out_of_time = wall0.elapsed().as_secs_f64() >= a.minutes * 60.0;
-        let finishing = stop_req || out_of_time;
+        let plan_done = planned_total.is_some_and(|p| t >= p);
+        // measured vs planned speed every 6 h, with the projected finish date
+        if let Some(p) = planned_total {
+            if prog_last.0.elapsed().as_secs_f64() >= PROGRESS_SECS || plan_done {
+                let dt = prog_last.0.elapsed().as_secs_f64();
+                let rate = (t - prog_last.1) as f64 / dt.max(1e-9);
+                let since = (t - prog_t0) as f64 / wall0.elapsed().as_secs_f64().max(1e-9);
+                let planned_rate = p as f64 / (a.plan_minutes.unwrap_or(a.minutes) * 60.0);
+                let remain = p.saturating_sub(t) as f64 / rate.max(1e-9);
+                let now = unix_now();
+                let line = format!(
+                    "{}	{t}	{:.4}	{rate:.0}	{since:.0}	{planned_rate:.0}	{:.3}	{}",
+                    utc(now),
+                    t as f64 / p as f64,
+                    rate / planned_rate,
+                    utc(now + remain as u64)
+                );
+                let path = a.run_dir.join("progress.tsv");
+                let new = !path.exists();
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                if new {
+                    writeln!(f, "utc	iteration	frac_done	it_per_s_last_window	it_per_s_this_process	planned_it_per_s	measured_over_planned	projected_finish_utc").unwrap();
+                }
+                writeln!(f, "{line}").unwrap();
+                println!("progress: {line}");
+                prog_last = (Instant::now(), t);
+            }
+        }
+        let finishing = stop_req || out_of_time || plan_done;
         if finishing || last_ckpt.elapsed().as_secs_f64() >= a.checkpoint_minutes * 60.0 {
             save(t, elapsed, &sched, snapshots);
             last_ckpt = Instant::now();
@@ -464,7 +533,7 @@ fn main() {
             lg.last = Instant::now();
         }
         if finishing {
-            println!("stopping at iteration {t} ({})", if stop_req { "stop file" } else { "time budget" });
+            println!("stopping at iteration {t} ({})", if stop_req { "stop file" } else if plan_done { "planned iterations done" } else { "time budget" });
             break;
         }
     }
