@@ -1,4 +1,4 @@
-# Handoff (updated 2026-11-08 ~16:00)
+# Handoff (updated 2026-11-08 ~17:10)
 
 Read this first. Then read `CLAUDE.md` (rules), `docs/fidelity_spec.md` (published
 parameters), `docs/deviations.md` (every difference) and `docs/fidelity_report.md` (latest
@@ -9,18 +9,20 @@ deviation documented, justified and, where possible, measured.
 
 - Repository: `C:\Users\User\pluribus-lite`, branch `main`; `git log -1` shows the latest
   commit. Tags: `m0`, `m1-prelim`, `m1-prelim2`, `m2-design`.
-- Tests: 45 `cfr`, 72 `nlhe` unit, 5 `nlhe` config tests; 15 Python tests; all pass.
+- Tests: 45 `cfr`, 74 `nlhe` unit, 5 `nlhe` config tests; 15 Python tests; all pass.
   `cd engine && cargo test --release` (cargo at `~/.cargo/bin`, not on PATH) and
   `cd analysis && .venv/Scripts/python -m pytest -q tests`.
 - Not in git, kept locally: `docs/papers/*.pdf` and `docs/sources/*.md` (third-party texts; index with SHA-256 in `docs/sources_review.md`);
-  `data/` (phh-dataset, parquet, `aay2400_data_file_s1.zip` + `s1/`, abstractions `j200`,
-  `j63` (+ `river.tbl`, 2.62 GiB), legacy `m2_11g`, `k200`, runs).
+  `data/` (phh-dataset, parquet, `aay2400_data_file_s1.zip` + `s1/`, abstractions `j200` (single
+  k-means fit; rebuild with 25 restarts before any faithful run), `j63` (25 restarts, 2026-11-08 16:50),
+  `j63_r1` (old single-fit j63, for comparison), legacy `m2_11g`, `k200`; runs, with discarded ones
+  under `data/runs/discarded/`).
 
 ## 2. Running background processes
 
 | what | PID | details |
 |---|---|---|
-| **Dell long run, pilot only** (`train_blueprint`, `pilot_dell_fit11.cfg`) | **30348** (cmd 7648), started by the scheduled task, so detached from any Claude session | started 2026-11-08 15:54:06, BelowNormal, 12 threads, **planned 83,518,000,000 iterations** (explicit, D-SCHED-2; ≈ 16 days at 60,415 it/s), river on the fly, checkpoint every 120 min, keep 2 |
+| **Dell long run, pilot only** (`train_blueprint`, `pilot_dell_fit11.cfg`, `j63` with 25 restarts) | **6984** (cmd 13840), started by the scheduled task, so detached from any Claude session | started **fresh** 2026-11-08 17:04:51, BelowNormal, 12 threads, **planned 83,518,000,000 iterations** (explicit, D-SCHED-2; ≈ 16 days at 60,415 it/s), river on the fly, checkpoint every 120 min, keep 2 |
 
 Run dir `C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\`:
 - `launcher.log`: every start/exit with the **exit code** (the place to look first)
@@ -30,7 +32,6 @@ Run dir `C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\`:
 - `watchdog.tsv`: memory every hour (sampled every 5 min); **STOP is created automatically
   if available RAM < 1 GB**
 - `schedule.txt`, `ckpt_*.bin`, `postflop_snapshots.bin` (from paper-minute 800 ≈ 26.7 h)
-- `aborted_20261108/`: logs of the 14:53 attempt (distorted warm-up, see deviations D-RUN-1)
 
 **Launcher:** `scripts\windows\run_pilot.ps1` (BelowNormal, private binary copy in
 `<run>\bin`, refuses to start if already running or if `STOP` exists).
@@ -60,21 +61,23 @@ close programs, delete STOP and start the task.
 
 ## 4. Open tasks, in priority order
 
-1. **Watch the run:** first checkpoint (~17:54 on 2026-11-08), first `progress.tsv` line
-   (~21:54), memory (watchdog).
-2. **Phase A2 sources** (in progress): `docs/sources_review.md` with recommendations; **no code
-   changes until the user has reviewed them**. The Reddit AMA could not be fetched (the fetch
-   tool blocks reddit.com): needs a manual save into `docs/sources/`.
-3. **Evaluation** (`docs/eval_plan.md`): preflop log-likelihood, AIVAT, on Dell checkpoints.
-4. **Open deviation measurements** (status "open" in deviations.md), including the D-ALG-5 and
+1. **Watch the run:** first checkpoint (~19:05 on 2026-11-08), first `progress.tsv` line
+   (~23:05), pruning starts at paper-minute 200 (≈ 7.8 h at the planned rate, later at the real
+   one), memory (watchdog). The graceful STOP path was verified on the discarded 15:54 run
+   (final checkpoint 1.78 GiB in 7.4 s, exit code 0).
+2. **Sources:** `docs/sources_review.md`. Applied: D-INFO-1 restarts, D-ACT-7 test, docs. Still
+   missing: the Reddit AMA (both the fetch tool and the Chrome extension block reddit.com; the user
+   saves it manually).
+3. **Rebuild `j200` with 25 restarts** before any faithful (HPC) run.
+4. **Evaluation** (`docs/eval_plan.md`): preflop log-likelihood, AIVAT, on Dell checkpoints.
+5. **Open deviation measurements** (status "open" in deviations.md), including the D-ALG-5 and
    D-ALG-9 ablations.
-5. **M4 search** per `fidelity_spec.md` §4.
-6. Housekeeping: delete legacy abstractions `m2_11g`, `k200` if not needed.
+6. **M4 search** per `fidelity_spec.md` §4.
+7. Housekeeping: delete legacy abstractions `m2_11g`, `k200` if not needed.
 
 Closed today: disk-safe I/O (task 1), OCHS river table + benchmark (task 2), Data S1
 cross-check (task 3), auto-resume task (task 4).
 
 ## 5. Half-finished work
 
-- Phase A2 (sources review) is in progress; downloaded PDFs are in `docs/papers/`.
-- The first checkpoint of the relaunched run has not been verified yet (due ~17:54).
+- Nothing half-coded. The first checkpoint of the 17:04 run is due ~19:05.
