@@ -18,6 +18,8 @@ pub mod kuhn;
 pub mod leduc;
 pub mod leduc_subgame;
 pub mod mccfr;
+pub mod nested;
 pub mod rng;
 pub mod search;
+pub mod subgame_solve;
 pub mod table;

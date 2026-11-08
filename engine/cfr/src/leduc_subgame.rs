@@ -21,6 +21,7 @@ use crate::game::{Action, ActionList, ChanceList, Game, NodeKind, MAX_ACTIONS};
 use crate::leduc::{key_for, Leduc, LeducState, CALL, FOLD, RAISE};
 use crate::search::{bayes, bias, sample_fixed, ActKind, N_CONT};
 use crate::table::Policy;
+use std::collections::{HashMap, HashSet};
 
 /// Set on the infoset keys of leaf choices (Leduc keys are below 4^13).
 pub const LEAF_TAG: u64 = 1 << 62;
@@ -50,6 +51,14 @@ pub struct LeducSubgame<'a, P: Policy> {
     /// Paper rule by default (leaves before round 1 when the root is on round 0).
     pub depth_limit: bool,
     pub root_round: u8,
+    /// Algorithm 2's frozen infosets: key → fixed action probabilities. The node becomes a chance
+    /// node for that hand, so every solver keeps it fixed (stage 5).
+    pub frozen: HashMap<u64, Vec<f64>>,
+    /// Search action abstraction without re-raises (to exercise off-tree actions on Leduc,
+    /// whose only sizes are fold/call/raise): a raise facing a raise is legal only at the
+    /// public states in `added` (Algorithm 2's AddAction).
+    pub no_reraise: bool,
+    pub added: HashSet<u64>,
     board: Option<u8>,
 }
 
@@ -73,12 +82,20 @@ pub fn replay(public: &[Action], c0: u8, c1: u8) -> LeducState {
 /// action and board card, starting from 1/6 each). Returns the ranges and the probability of
 /// each observation in order (0 marks one that σ rules out, D-SRCH-2).
 pub fn leduc_beliefs<P: Policy>(public: &[Action], sigma: &P) -> ([Vec<f64>; 2], Vec<f64>) {
-    let g = Leduc;
     let mut r = [vec![1.0 / CARDS as f64; CARDS], vec![1.0 / CARDS as f64; CARDS]];
+    let obs = update_beliefs(&mut r, &[], public, sigma);
+    (r, obs)
+}
+
+/// Bayes updates of `r` for the public `actions` that follow the public history `prefix`, with
+/// both players following `sigma` (used per round by the nested search, stage 5). Returns each
+/// observation's probability (0 = ruled out by σ, prior kept, D-SRCH-2).
+pub fn update_beliefs<P: Policy>(r: &mut [Vec<f64>; 2], prefix: &[Action], actions: &[Action], sigma: &P) -> Vec<f64> {
+    let g = Leduc;
     let mut obs = Vec::new();
     // placeholder hole cards: infoset keys only read the actor's card, which we vary below
-    let mut s = replay(&[], 0, 1);
-    for &a in public {
+    let mut s = replay(prefix, 0, 1);
+    for &a in actions {
         let mut lik = [0.0; CARDS];
         match g.kind(&s) {
             NodeKind::Chance => {
@@ -103,7 +120,12 @@ pub fn leduc_beliefs<P: Policy>(public: &[Action], sigma: &P) -> ([Vec<f64>; 2],
         }
         s = g.apply(&s, a);
     }
-    (r, obs)
+    obs
+}
+
+/// Key of the public state at `s` (betting history and board rank), shared by both players.
+pub fn public_key(s: &LeducState) -> u64 {
+    key_for(s, 0) >> 2
 }
 
 impl<'a, P: Policy> LeducSubgame<'a, P> {
@@ -115,7 +137,36 @@ impl<'a, P: Policy> LeducSubgame<'a, P> {
             "the subgame root must be the start of a betting round"
         );
         let board = (s.round == 1).then_some(s.board);
-        LeducSubgame { public, ranges, blueprint, n_cont, compress, depth_limit: s.round == 0, root_round: s.round, board }
+        LeducSubgame {
+            public,
+            ranges,
+            blueprint,
+            n_cont,
+            compress,
+            depth_limit: s.round == 0,
+            root_round: s.round,
+            frozen: HashMap::new(),
+            no_reraise: false,
+            added: HashSet::new(),
+            board,
+        }
+    }
+
+    /// Betting actions of the search abstraction at a Leduc decision state.
+    pub fn betting_actions(&self, s: &LeducState) -> ActionList {
+        let all = Leduc.legal_actions(s);
+        if !self.no_reraise || s.raises == 0 || self.added.contains(&public_key(s)) {
+            return all;
+        }
+        ActionList::from_slice(&all.as_slice().iter().copied().filter(|&a| a != RAISE).collect::<Vec<_>>())
+    }
+
+    /// Frozen probabilities at a Leduc decision state, if its infoset is frozen.
+    pub fn frozen_at(&self, s: &LeducState) -> Option<&Vec<f64>> {
+        if self.frozen.is_empty() {
+            return None;
+        }
+        self.frozen.get(&Leduc.infoset_key(s))
     }
 
     /// Weight of the deal (c0, c1) at the root, before normalisation.
@@ -193,7 +244,10 @@ impl<'a, P: Policy> Game for LeducSubgame<'a, P> {
     fn kind(&self, s: &SubState) -> NodeKind {
         match s {
             SubState::Deal0 | SubState::Deal1(_) => NodeKind::Chance,
-            SubState::Play(st) => Leduc.kind(st),
+            SubState::Play(st) => match Leduc.kind(st) {
+                NodeKind::Player(_) if self.frozen_at(st).is_some() => NodeKind::Chance,
+                k => k,
+            },
             SubState::Leaf { next, .. } if *next < 2 => NodeKind::Player(*next as usize),
             SubState::Leaf { .. } => NodeKind::Terminal,
         }
@@ -234,7 +288,16 @@ impl<'a, P: Policy> Game for LeducSubgame<'a, P> {
                     }
                 }
             }
-            SubState::Play(st) => return Leduc.chance_outcomes(st),
+            SubState::Play(st) => match self.frozen_at(st) {
+                Some(f) => {
+                    for (&a, &p) in self.betting_actions(st).as_slice().iter().zip(f) {
+                        if p > 0.0 {
+                            c.push(a, p);
+                        }
+                    }
+                }
+                None => return Leduc.chance_outcomes(st),
+            },
             SubState::Leaf { .. } => panic!("a leaf is not a chance node"),
         }
         c
@@ -242,7 +305,7 @@ impl<'a, P: Policy> Game for LeducSubgame<'a, P> {
 
     fn legal_actions(&self, s: &SubState) -> ActionList {
         match s {
-            SubState::Play(st) => Leduc.legal_actions(st),
+            SubState::Play(st) => self.betting_actions(st),
             SubState::Leaf { .. } => ActionList::from_slice(&[0, 1, 2, 3][..self.n_cont]),
             _ => panic!("no player acts at a chance node"),
         }
