@@ -57,15 +57,33 @@ half-finished work. Fidelity rules are in `docs/fidelity_spec.md` (published par
 - `docs/`: notes, stats reports, and the paper supplement PDF.
 - `data/`: raw dataset clone and derived parquet files (gitignored).
 
-## Machine
-- CPU: Intel Core i7-10750H @ 2.60 GHz, 6 cores / 12 threads (laptop).
+## Machines
+Two Windows laptops, same code from GitHub (`villopapia/pluribus-lite`). Check `hostname` first.
+
+### Dell (`DESKTOP-G1K8UGG`): training only
+Runs the long blueprint run, its watchdog and monitoring. **No development, builds, benchmarks
+or tests while a run is going** (they distort its speed and memory). Code reaches it only by
+stop / pull / build / restart. Repo at `C:\Users\User\pluribus-lite`.
+- CPU: Intel Core i7-10750H @ 2.60 GHz, 6 cores / 12 threads.
 - RAM: **16 GB total (15.8 GB usable)**, 2 x 8 GB DDR4 dual-channel, running at 2933 MT/s.
   This is the binding constraint: blueprint tables plus the abstraction must fit well under
   ~10 GB. Size the M2 abstraction for that limit, which means far coarser than the paper's.
 - Disk: C: only, ~194 GB free of 952 GB at setup.
 - OS: Windows 11 Pro 10.0.26300. WSL2 not installed.
-- Python: 3.13.1 (default via `py`), plus 3.12 and 3.10. The `python3` command is the
-  Microsoft Store stub, so don't use it.
+- Python: 3.13.1 (default via `py`), plus 3.12 and 3.10.
+
+### MSI (`MSI`): development
+All coding, tests, builds and benchmarks. Repo at `C:\Users\chris\Desktop\pluribus-lite`.
+Set up 2026-11-08: j63 rebuilt here is byte-identical to the Dell's (`docs/j63_hashes.txt`).
+- CPU: Intel Core i7-14650HX, 16 cores / 24 threads.
+- RAM: 16 GB (15.7 GiB usable), 2 x 8 GB DDR5 at 5600 MT/s.
+- Disk: C: only, ~416 GB free of 925 GB at setup.
+- OS: Windows 11 Home 10.0.26300. WSL2 with Ubuntu 24.04 present (not used by the project).
+- Python: 3.13.17 per-user (default via `py`), plus 3.12 (which is the `python` on PATH, so
+  use `py -3.13` or the venv). Venv pinned by `analysis/requirements.lock`.
+
+### Both
+- The `python3` command is the Microsoft Store stub, so don't use it.
 - Rust: rustup with `stable-x86_64-pc-windows-gnu` (rustc 1.99.1), user-local in
   `~/.cargo` and `~/.rustup`. **PATH was not modified**, so call
   `~/.cargo/bin/cargo` directly or prepend it to PATH in your shell session.

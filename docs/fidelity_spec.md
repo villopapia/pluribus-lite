@@ -16,19 +16,19 @@ recorded in `docs/deviations.md`, never here.
 All files are in `docs/papers/` (gitignored, not redistributed; re-download from the URLs).
 The SHA-256 hashes identify the exact versions read.
 
-| short name | document | URL | status | SHA-256 (first 16) |
+| short name | document | URL | status | SHA-256 |
 |---|---|---|---|---|
-| **Supp** | Brown & Sandholm, *Superhuman AI for multiplayer poker*, Science 2019, Supplementary Materials | noambrown.github.io/papers/19-Science-Superhuman_Supp.pdf | read in full | c135897c574faad6 |
-| **Main** | same paper, Science 365:885–890 (30 Aug 2019) | noambrown.github.io/papers/19-Science-Superhuman.pdf | read: method, compute, evaluation sections | 04e3d2bf9baf601f |
-| **Thesis** | N. Brown, *Equilibrium Finding for Large Adversarial Imperfect-Information Games*, CMU-CS-20-132, Sept 2020 | reports-archive.adm.cs.cmu.edu/anon/2020/CMU-CS-20-132.pdf | §6.6 "Pluribus" (pp. 189–192) read; restates Main/Supp, adds p-values 0.028 (5H+1AI) and 0.014 (1H+5AI); no new blueprint or search parameters found | cfc996da41ba583b |
-| [26] | Johanson, Burch, Valenzano, Bowling, *Evaluating state-space abstractions in extensive-form games*, AAMAS 2013 | ifaamas.org/Proceedings/aamas2013/docs/p271.pdf | read: features (§ hand-strength histograms + EMD, OCHS, Table 1) | f5b3b85043e40e66 |
-| [38] | Brown & Sandholm, *Solving imperfect-information games via discounted regret minimization*, AAAI 2019 | arxiv.org/pdf/1809.04040 | downloaded (Linear/Discounted CFR) | b28b1f66afd97846 |
-| [41] | Brown, Sandholm, Amos, *Depth-limited solving for imperfect-information games*, NeurIPS 2018 | arxiv.org/pdf/1805.08195 | downloaded (M4) | 27a09b43ece36828 |
-| [39] | Ganzfried & Sandholm, *Action translation in extensive-form games with large action spaces*, IJCAI 2013 | ijcai.org/Proceedings/13/Papers/028.pdf | downloaded (pseudo-harmonic mapping, M4) | 4e19eb49de125179 |
-| [28] | Brown, Ganzfried, Sandholm, *Hierarchical abstraction, distributed equilibrium computation, and post-processing...*, AAMAS 2015 | ifaamas.org/Proceedings/aamas2015/aamas/p7.pdf | downloaded (search abstraction, M4) | daa6a8116d89df6c |
-| [44] | Burch, Schmid, Moravčík, Morrill, Bowling, *AIVAT*, AAAI 2018 | arxiv.org/pdf/1612.06915 | downloaded (evaluation) | b40e9d02e86a5dfc |
-| **Data S1** | original hand logs (Supp "Data File S1 as zipped archive"), `data/aay2400_data_file_s1.zip` | science.org supplementary files (downloaded manually by the user) | read in full: 10,000 hands of 5H+1AI in ACPC format; **identical to the PHH conversion in all 10,000 hands** (`docs/s1_crosscheck.md`) | f1afeea99645f96d |
-| **Supp (Science copy)** | the supplement as served by Science, `docs/papers/aay2400-brown-sm.pdf` | science.org (supplied by the user) | **byte-identical to the author's copy** (same SHA-256), so the same version and text | c135897c574faad6 |
+| **Supp** | Brown & Sandholm, *Superhuman AI for multiplayer poker*, Science 2019, Supplementary Materials | noambrown.github.io/papers/19-Science-Superhuman_Supp.pdf | read in full | c135897c574faad6fa70e943ae9d61ae0d4c189a6e0ed3e74fff596aba8d7535 |
+| **Main** | same paper, Science 365:885–890 (30 Aug 2019) | noambrown.github.io/papers/19-Science-Superhuman.pdf | read: method, compute, evaluation sections | 04e3d2bf9baf601feebd703cd27838f0eb89310fdf02324c68fcc4fe842cd4c5 |
+| **Thesis** | N. Brown, *Equilibrium Finding for Large Adversarial Imperfect-Information Games*, CMU-CS-20-132, Sept 2020 | reports-archive.adm.cs.cmu.edu/anon/2020/CMU-CS-20-132.pdf | §6.6 "Pluribus" (pp. 189–192) read; restates Main/Supp, adds p-values 0.028 (5H+1AI) and 0.014 (1H+5AI); no new blueprint or search parameters found | cfc996da41ba583b6661847a8aca45f3215f356290897d602a033035c442082a |
+| [26] | Johanson, Burch, Valenzano, Bowling, *Evaluating state-space abstractions in extensive-form games*, AAMAS 2013 | ifaamas.org/Proceedings/aamas2013/docs/p271.pdf | read: features (§ hand-strength histograms + EMD, OCHS, Table 1) | f5b3b85043e40e66fc008e74f290783bb212c2c27b1cc6c6280e82dfd55e34c0 |
+| [38] | Brown & Sandholm, *Solving imperfect-information games via discounted regret minimization*, AAAI 2019 | arxiv.org/pdf/1809.04040 | downloaded (Linear/Discounted CFR) | **pending verification:** recorded prefix `b28b1f66afd97846` (Dell copy); MSI re-download 2026-11-08 (arXiv v3, latest) is `b28b1f66afd9784f0f4651b96eab7e1e33404aa0516c9825b25d92b7dbb7a4d0`. Awaiting the Dell file's full hash |
+| [41] | Brown, Sandholm, Amos, *Depth-limited solving for imperfect-information games*, NeurIPS 2018 | arxiv.org/pdf/1805.08195 | downloaded (M4) | 27a09b43ece36828a9af40dddaad7f21b4a1b2c069996eb2e477219f770b9a26 |
+| [39] | Ganzfried & Sandholm, *Action translation in extensive-form games with large action spaces*, IJCAI 2013 | ijcai.org/Proceedings/13/Papers/028.pdf | downloaded (pseudo-harmonic mapping, M4) | 4e19eb49de1251793f14409f128ecf1c33e351b8da4167af1995bacc760476e0 |
+| [28] | Brown, Ganzfried, Sandholm, *Hierarchical abstraction, distributed equilibrium computation, and post-processing...*, AAMAS 2015 | ifaamas.org/Proceedings/aamas2015/aamas/p7.pdf | downloaded (search abstraction, M4) | daa6a8116d89df6c0a8a854e4cb0263355aeeb6e4c70791d6ad79aaeef7d5482 |
+| [44] | Burch, Schmid, Moravčík, Morrill, Bowling, *AIVAT*, AAAI 2018 | arxiv.org/pdf/1612.06915 | downloaded (evaluation) | b40e9d02e86a5dfc00c9c713e73795adfa1073f04f8ee440fba7b3a0fd220e58 |
+| **Data S1** | original hand logs (Supp "Data File S1 as zipped archive"), `data/aay2400_data_file_s1.zip` | science.org supplementary files (downloaded manually by the user) | read in full: 10,000 hands of 5H+1AI in ACPC format; **identical to the PHH conversion in all 10,000 hands** (`docs/s1_crosscheck.md`) | f1afeea99645f96db40d0fafc19e3da37fbab3ab59456db9f2e6039abd880f0c |
+| **Supp (Science copy)** | the supplement as served by Science, `docs/papers/aay2400-brown-sm.pdf` | science.org (supplied by the user) | **byte-identical to the author's copy** (same SHA-256), so the same version and text | c135897c574faad6fa70e943ae9d61ae0d4c189a6e0ed3e74fff596aba8d7535 |
 
 Main-paper page numbers are the journal's (885–890); Thesis page numbers are printed ones.
 
