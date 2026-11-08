@@ -1,5 +1,15 @@
 # Algorithm 1 vs our code: line-by-line differences
 
+> **Superseded as the authoritative record by `docs/deviations.md`** (all deviations, with
+> reasons and tests) and `docs/fidelity_spec.md` (all published parameters). This file keeps
+> the original Algorithm 1 comparison. Page numbers here and there are the supplement's
+> **printed** page numbers (PDF page = printed + 1).
+>
+> Since this comparison, the following changed:
+> - First-use regret allocation is implemented (S10).
+> - Preflop φ sampling starts at paper minute 800, following the text (A2 → D-ALG-3).
+> - The schedule is defined as fractions of the planned run (D-SCHED-1).
+
 Source: Brown & Sandholm, *Superhuman AI for multiplayer poker*, Science 2019, supplementary
 materials (`docs/19-Science-Superhuman_Supp.pdf`). Sections used:
 - "Equilibrium finding" (p. 3)

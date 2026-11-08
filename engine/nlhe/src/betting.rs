@@ -237,6 +237,10 @@ pub struct TreeCounter<'a> {
     pub cfg: &'a AbstractionConfig,
     memo: FxHashMap<BState, TreeCounts>,
     pub max_memo: usize,
+    /// When true, a full memo is cleared and counting continues (exact, slower) instead of
+    /// failing with `MemoLimit`.
+    pub evict_when_full: bool,
+    pub evictions: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -244,7 +248,7 @@ pub struct MemoLimit(pub usize);
 
 impl<'a> TreeCounter<'a> {
     pub fn new(rules: Rules, cfg: &'a AbstractionConfig) -> Self {
-        TreeCounter { rules, cfg, memo: FxHashMap::default(), max_memo: 4_000_000 }
+        TreeCounter { rules, cfg, memo: FxHashMap::default(), max_memo: 4_000_000, evict_when_full: false, evictions: 0 }
     }
 
     pub fn memo_len(&self) -> usize {
@@ -263,10 +267,34 @@ impl<'a> TreeCounter<'a> {
         s.street > 0 && s.raises == 0 && s.need == live && s.street_bet.iter().all(|&b| b == 0)
     }
 
+    /// Memo key with folded players canonicalised: their chips only matter through the pot
+    /// (dead money) and their street bets are always below the current max bet, so the
+    /// subtree is identical if all dead money sits in the first folded seat and folded
+    /// street bets are zero.
+    fn canonical(&self, s: &BState) -> BState {
+        let mut k = *s;
+        if k.folded == 0 {
+            return k;
+        }
+        let mut dead = 0u32;
+        let mut first = usize::MAX;
+        for p in 0..self.rules.players {
+            if k.folded & (1 << p) != 0 {
+                dead += k.total[p];
+                k.total[p] = 0;
+                k.street_bet[p] = 0;
+                first = first.min(p);
+            }
+        }
+        k.total[first] = dead;
+        k
+    }
+
     fn rec(&mut self, s: &BState) -> Result<TreeCounts, MemoLimit> {
         let memoise = self.is_street_start(s);
+        let key = if memoise { self.canonical(s) } else { *s };
         if memoise {
-            if let Some(c) = self.memo.get(s) {
+            if let Some(c) = self.memo.get(&key) {
                 return Ok(*c);
             }
         }
@@ -285,9 +313,13 @@ impl<'a> TreeCounter<'a> {
         }
         if memoise {
             if self.memo.len() >= self.max_memo {
-                return Err(MemoLimit(self.memo.len()));
+                if !self.evict_when_full {
+                    return Err(MemoLimit(self.memo.len()));
+                }
+                self.memo.clear();
+                self.evictions += 1;
             }
-            self.memo.insert(*s, c);
+            self.memo.insert(key, c);
         }
         Ok(c)
     }
@@ -477,6 +509,37 @@ river.0 = 1.0");
             }
         }
         walk(&r, &c, &r.root());
+    }
+
+    #[test]
+    fn canonical_memo_matches_naive_with_folds_and_limps() {
+        // 5 players, limping allowed, multiple sizes: many histories differ only in who
+        // folded and for how much
+        let r = Rules { players: 5, ..Rules::default() };
+        let c = cfg("limp = all
+preflop.0 = 0.5, 1.0
+preflop.1 = 1.0
+flop.0 = 0.5
+turn.0 = 1.0
+river.0 = 1.0");
+        let mut m = TreeCounter::new(r, &c);
+        assert_eq!(m.count().unwrap(), count_naive(&r, &c));
+    }
+
+    #[test]
+    fn eviction_keeps_counts_exact() {
+        let r = Rules { players: 4, ..Rules::default() };
+        let c = cfg("limp = all
+preflop.0 = 0.5, 1.0
+preflop.1 = 1.0
+flop.0 = 0.5
+turn.0 = 1.0
+river.0 = 1.0");
+        let mut m = TreeCounter::new(r, &c);
+        m.max_memo = 3;
+        m.evict_when_full = true;
+        assert_eq!(m.count().unwrap(), count_naive(&r, &c));
+        assert!(m.evictions > 0);
     }
 
     #[test]

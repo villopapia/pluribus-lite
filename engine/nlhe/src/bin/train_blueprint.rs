@@ -3,17 +3,17 @@
 //!
 //! `train_blueprint --config nlhe/configs/m2_11g.cfg --abstraction-dir ../data/abstraction/m2_11g
 //!   --buckets 256 --run-dir ../data/runs/NAME --threads 12 --minutes 1440
-//!   [--warmup-minutes 10] [--schedule-scale 1.0] [--strategy-interval 10000]
+//!   [--plan-minutes 23040] [--warmup-minutes 10] [--strategy-interval 10000]
 //!   [--checkpoint-minutes 120] [--keep-checkpoints 3] [--log-seconds 60]
 //!   [--stop-file PATH] [--seed 1] [--bench-seconds S]`
 //!
 //! * Resumes automatically from the newest `ckpt_*.bin` in the run dir (schedule, seed and
 //!   snapshot count come from the checkpoint).
 //! * Fresh runs train a warm-up of `--warmup-minutes` with no pruning/discounting, measure
-//!   the iteration rate over its second half, and then fix the paper's schedule in
-//!   iterations: discount every 10 min until 400 min (the first one exactly at the end of
-//!   the warm-up), prune after 200 min, post-flop snapshots every 200 min after 800 min.
-//!   `--schedule-scale` multiplies all paper minutes (1.0 = paper; < 1 for short tests).
+//!   the iteration rate over its second half, and plan `--plan-minutes` (default: --minutes)
+//!   of training at that rate. A "paper minute" is 1/11,520 of the planned iterations
+//!   (Pluribus' ~8-day run; docs/deviations.md D-SCHED-1): discount every 10 until 400,
+//!   prune after 200, preflop average sampling and post-flop snapshots (every 200) from 800.
 //! * Stops on the time budget or when the stop file exists, always writing a final checkpoint.
 //!   Keeps the newest `--keep-checkpoints` checkpoint files.
 //! * Checkpoints stream to disk in 1 MiB chunks (no table-sized copy in memory).
@@ -36,7 +36,7 @@ struct Args {
     threads: usize,
     minutes: f64,
     warmup_minutes: f64,
-    schedule_scale: f64,
+    plan_minutes: Option<f64>,
     strategy_interval: u64,
     checkpoint_minutes: f64,
     keep_checkpoints: usize,
@@ -55,7 +55,7 @@ fn parse() -> Args {
         threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
         minutes: 60.0,
         warmup_minutes: 10.0,
-        schedule_scale: 1.0,
+        plan_minutes: None,
         strategy_interval: 10_000,
         checkpoint_minutes: 120.0,
         keep_checkpoints: 3,
@@ -76,7 +76,7 @@ fn parse() -> Args {
             "--threads" => a.threads = x.parse().unwrap(),
             "--minutes" => a.minutes = x.parse().unwrap(),
             "--warmup-minutes" => a.warmup_minutes = x.parse().unwrap(),
-            "--schedule-scale" => a.schedule_scale = x.parse().unwrap(),
+            "--plan-minutes" => a.plan_minutes = Some(x.parse().unwrap()),
             "--strategy-interval" => a.strategy_interval = x.parse().unwrap(),
             "--checkpoint-minutes" => a.checkpoint_minutes = x.parse().unwrap(),
             "--keep-checkpoints" => a.keep_checkpoints = x.parse().unwrap(),
@@ -125,12 +125,13 @@ fn main() {
     let tree = Tree::build(&Rules::default(), &cfg, abs.buckets());
     let st = Storage::new(&tree);
     println!(
-        "setup {:.1}s: {} nodes ({} decision), {} regrets ({:.2} GiB), {} avg counts ({:.2} GiB), buckets {:?}, threads {}",
+        "setup {:.1}s: {} nodes ({} decision), {} regret slots if dense ({:.2} GiB), {} preflop slots allocated, {} avg counts ({:.2} GiB), buckets {:?}, threads {}",
         t_setup.elapsed().as_secs_f64(),
         tree.nodes.len(),
         tree.decision_nodes.iter().sum::<u64>(),
         tree.n_regrets,
         tree.n_regrets as f64 * 4.0 / 1073741824.0,
+        st.allocated_slots(),
         tree.n_avg,
         tree.n_avg as f64 * 4.0 / 1073741824.0,
         tree.buckets,
@@ -197,7 +198,7 @@ fn main() {
     lg.prev_pre = policy_snapshot(&tree, &st, &lg.pre_s);
     lg.prev_post = policy_snapshot(&tree, &st, &lg.post_s);
     if new_file {
-        writeln!(lg.file, "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\tphase").unwrap();
+        writeln!(lg.file, "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tphase").unwrap();
     }
 
     let wall0 = Instant::now();
@@ -253,12 +254,23 @@ fn main() {
             if w >= a.warmup_minutes * 60.0 {
                 let (wm, tm) = warm_mid.unwrap_or((0.0, warm_t0));
                 let rate = (t - tm) as f64 / (w - wm).max(1e-9); // it/s over the second half
-                sched = Schedule::paper_minutes(t, rate * 60.0, a.strategy_interval, a.schedule_scale);
+                let plan = a.plan_minutes.unwrap_or(a.minutes);
+                // planned run = warm-up iterations + the rest of the plan at the measured rate
+                let planned = t + (rate * (plan * 60.0 - w).max(0.0)) as u64;
+                sched = Schedule::pluribus_scaled(planned, a.strategy_interval);
                 in_warmup = false;
                 phase = "warmup_end";
+                let skipped = (1u64..).take_while(|k| k * sched.discount_every <= t).count();
                 let txt = format!(
-                    "warm-up: {:.1} min, {} iterations, rate over second half {:.0} it/s\nschedule (paper minutes x {}): {:?}\n",
-                    w / 60.0, t, rate, a.schedule_scale, sched
+                    "warm-up: {:.1} min, {} iterations, rate over second half {:.0} it/s\nplanned: {} min -> {} iterations; paper minute = {:.0} iterations\nschedule: {:?}\ndiscount boundaries passed during the warm-up (skipped): {}\n",
+                    w / 60.0,
+                    t,
+                    rate,
+                    plan,
+                    planned,
+                    planned as f64 / 11_520.0,
+                    sched,
+                    skipped
                 );
                 print!("{txt}");
                 std::fs::write(a.run_dir.join("schedule.txt"), txt).unwrap();
@@ -314,8 +326,15 @@ fn main() {
                 row += &format!("\t{:.4}", rs.touched[sidx] as f64 / rs.infosets[sidx].max(1) as f64);
             }
             row += &format!(
-                "\t{:.5}\t{:.5}\t{}\t{}\t{}\t{}",
-                ch_pre, ch_post, total.regret.saturated, total.regret.floored, snapshots, phase
+                "\t{:.5}\t{:.5}\t{}\t{}\t{}\t{:.3}\t{:.4}\t{}",
+                ch_pre,
+                ch_post,
+                total.regret.saturated,
+                total.regret.floored,
+                snapshots,
+                st.allocated_slots() as f64 * 4.0 / 1073741824.0,
+                st.allocated_slots() as f64 / tree.n_regrets as f64,
+                phase
             );
             println!("{row}");
             writeln!(lg.file, "{row}").unwrap();

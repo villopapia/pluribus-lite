@@ -33,6 +33,9 @@ pub struct AbstractionConfig {
     /// set (`None`) falls back to `sizes`; an explicitly empty list means all-in only.
     /// Not allowed preflop, where every open is "multiway" by player count.
     pub multiway: [Vec<Option<Vec<f64>>>; 4],
+    /// `<street>.<d>+ = sizes`: these sizes at depth d and every deeper depth (unless a
+    /// specific depth is listed). Used for the paper's turn/river rule "later raises {1x}".
+    pub repeat_from: [Option<(usize, Vec<f64>)>; 4],
     pub avg_strategy_streets: [bool; 4],
     /// Who may flat-call the big blind in an unraised preflop pot (BB checking is always allowed).
     pub limp: Limp,
@@ -107,6 +110,7 @@ impl AbstractionConfig {
             allin: true,
             sizes: Default::default(),
             multiway: Default::default(),
+            repeat_from: Default::default(),
             avg_strategy_streets: [true, false, false, false],
             limp: Limp::All,
             crowded_players: 0,
@@ -166,6 +170,17 @@ impl AbstractionConfig {
                     }
                 }
                 _ => {
+                    if let Some(base) = k.strip_suffix('+') {
+                        let parts: Vec<&str> = base.split('.').collect();
+                        let (street, depth) = match parts.as_slice() {
+                            [s, d] => (*s, *d),
+                            _ => return Err(ConfigError(format!("bad repeat key {k:?}"))),
+                        };
+                        let si = street_index(street)?;
+                        let d: usize = depth.parse().map_err(|_| ConfigError(format!("bad depth in {k:?}")))?;
+                        c.repeat_from[si] = Some((d, parse_list(v)?));
+                        continue;
+                    }
                     let parts: Vec<&str> = k.split('.').collect();
                     let (mw, street, depth) = match parts.as_slice() {
                         [s, d] => (false, *s, *d),
@@ -204,7 +219,15 @@ impl AbstractionConfig {
                 return v;
             }
         }
-        self.sizes[street].get(depth).map(|v| v.as_slice()).unwrap_or(&[])
+        if let Some(v) = self.sizes[street].get(depth) {
+            if !v.is_empty() || self.repeat_from[street].as_ref().is_none_or(|(d, _)| depth < *d) {
+                return v;
+            }
+        }
+        match &self.repeat_from[street] {
+            Some((d, v)) if depth >= *d => v,
+            _ => &[],
+        }
     }
 }
 
@@ -254,6 +277,17 @@ mod tests {
             AbstractionConfig::parse("river_method = precomputed_table").unwrap().river_method,
             RiverMethod::PrecomputedTable
         );
+    }
+
+    #[test]
+    fn repeat_from_depth() {
+        let c = AbstractionConfig::parse("turn.0 = 0.5, 1.0
+turn.1+ = 1.0").unwrap();
+        assert_eq!(c.sizes_for(2, 0, 2), &[0.5, 1.0]);
+        assert_eq!(c.sizes_for(2, 1, 2), &[1.0]);
+        assert_eq!(c.sizes_for(2, 5, 6), &[1.0]);
+        assert!(c.sizes_for(3, 1, 2).is_empty());
+        assert!(AbstractionConfig::parse("turn+ = 1.0").is_err());
     }
 
     #[test]

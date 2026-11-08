@@ -322,52 +322,99 @@ pub fn fit_kmedians(points: &[u8], dim: usize, k: usize, max_iters: usize, seed:
 
 // ---------------------------------------------------------------- river cut-offs
 
-/// 1-D k-means on a weighted histogram of quantised equity (bins over [0, 1]).
-/// Returns k-1 increasing cut-offs in equity units; bucket(e) = #cut-offs <= e.
+/// 1-D k-means (Lloyd) on a weighted histogram of quantised equity (bins over [0, 1]),
+/// returning k-1 increasing cut-offs; bucket(e) = #cut-offs <= e.
+///
+/// Empty or duplicate centroids are reseeded at the bin with the largest weighted squared
+/// error (standard k-means practice), so the result has **exactly k distinct, non-empty
+/// clusters** whenever the histogram has at least k non-empty bins. (Without reseeding,
+/// centroids collide on discrete equity values: 193 of 200 in the first build.)
 pub fn river_cutoffs(hist: &[u64], k: usize, max_iters: usize) -> Vec<f32> {
     let nb = hist.len();
     let total: u64 = hist.iter().sum();
     assert!(total > 0 && k >= 2);
+    let nonempty: Vec<usize> = (0..nb).filter(|&b| hist[b] > 0).collect();
+    let k = k.min(nonempty.len());
     let x = |b: usize| b as f64 / (nb - 1) as f64;
-    // init: weighted quantile midpoints
-    let mut cent = Vec::with_capacity(k);
+    // init: weighted quantiles (may coincide; repaired below)
+    let mut cent: Vec<f64> = Vec::with_capacity(k);
     let mut cum = 0u64;
-    let mut b = 0usize;
+    let mut bi = 0usize;
     for c in 0..k {
         let target = ((2 * c as u64 + 1) * total) / (2 * k as u64);
-        while b < nb - 1 && cum + hist[b] <= target {
-            cum += hist[b];
-            b += 1;
+        while bi < nb - 1 && cum + hist[bi] <= target {
+            cum += hist[bi];
+            bi += 1;
         }
-        cent.push(x(b));
+        cent.push(x(bi));
     }
+    // assign every non-empty bin to its nearest centroid (centroids sorted)
+    let assign = |cent: &[f64]| -> Vec<usize> {
+        let cuts: Vec<f64> = cent.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
+        let mut c = 0usize;
+        nonempty
+            .iter()
+            .map(|&b| {
+                let v = x(b);
+                while c < cuts.len() && v >= cuts[c] {
+                    c += 1;
+                }
+                c
+            })
+            .collect()
+    };
     for _ in 0..max_iters {
         cent.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        cent.dedup();
-        let cuts: Vec<f64> = cent.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
-        let mut sw = vec![0f64; cent.len()];
-        let mut sx = vec![0f64; cent.len()];
-        let mut c = 0usize;
-        for (bi, &w) in hist.iter().enumerate() {
-            if w == 0 {
-                continue;
-            }
-            let v = x(bi);
-            while c < cuts.len() && v >= cuts[c] {
-                c += 1;
-            }
-            sw[c] += w as f64;
-            sx[c] += w as f64 * v;
+        let owner = assign(&cent);
+        let mut sw = vec![0f64; k];
+        let mut sx = vec![0f64; k];
+        for (j, &b) in nonempty.iter().enumerate() {
+            sw[owner[j]] += hist[b] as f64;
+            sx[owner[j]] += hist[b] as f64 * x(b);
         }
-        let new: Vec<f64> = (0..cent.len()).map(|i| if sw[i] > 0.0 { sx[i] / sw[i] } else { cent[i] }).collect();
+        let mut new: Vec<f64> = (0..k).map(|i| if sw[i] > 0.0 { sx[i] / sw[i] } else { f64::NAN }).collect();
+        // repair: empty clusters and duplicate centroids
+        let mut bad: Vec<usize> = (0..k).filter(|&i| new[i].is_nan()).collect();
+        {
+            let mut idx: Vec<usize> = (0..k).filter(|&i| !new[i].is_nan()).collect();
+            idx.sort_by(|&a, &b| new[a].partial_cmp(&new[b]).unwrap());
+            for w in idx.windows(2) {
+                if new[w[1]] - new[w[0]] < 1e-12 {
+                    bad.push(w[1]);
+                }
+            }
+        }
+        let repaired = !bad.is_empty();
+        if repaired {
+            // weighted squared error of each bin w.r.t. its current centroid
+            let mut err: Vec<(f64, usize)> = nonempty
+                .iter()
+                .enumerate()
+                .map(|(j, &b)| (hist[b] as f64 * (x(b) - cent[owner[j]]).powi(2), b))
+                .collect();
+            err.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
+            let mut used: Vec<f64> = new.iter().copied().filter(|v| !v.is_nan()).collect();
+            let mut e = err.into_iter();
+            for &i in &bad {
+                // next highest-error bin whose position is not already a centroid
+                for (_, b) in e.by_ref() {
+                    let v = x(b);
+                    if used.iter().all(|&u| (u - v).abs() > 1e-12) {
+                        new[i] = v;
+                        used.push(v);
+                        break;
+                    }
+                }
+            }
+        }
         let moved = new.iter().zip(&cent).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         cent = new;
-        if moved < 1e-9 {
+        if !repaired && moved < 1e-12 {
             break;
         }
     }
     cent.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    cent.dedup();
+    cent.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
     cent.windows(2).map(|w| (0.5 * (w[0] + w[1])) as f32).collect()
 }
 
@@ -741,8 +788,10 @@ mod tests {
         let m = bucket_masses(&h, &cuts);
         assert_eq!(m.len(), 256);
         assert!(m.iter().all(|&x| x > 0), "empty bucket");
-        // k-means on the same histogram merges centroids
-        assert!(river_cutoffs(&h, 256, 500).len() < 255);
+        // k-means with reseeding also gives exactly k distinct, non-empty buckets
+        let km = river_cutoffs(&h, 256, 500);
+        assert_eq!(km.len(), 255);
+        assert!(bucket_masses(&h, &km).iter().all(|&x| x > 0), "k-means left an empty bucket");
     }
 
     #[test]

@@ -25,6 +25,8 @@ struct Args {
     fit_boards: usize,
     max_iters: usize,
     stages: Vec<String>,
+    /// "kmeans" (paper: k-means; default) or "equal_mass" (exactly k buckets)
+    river_method: String,
 }
 
 fn parse_args() -> Args {
@@ -36,6 +38,7 @@ fn parse_args() -> Args {
         fit_boards: 1000,
         max_iters: 30,
         stages: vec!["river".into(), "flop".into(), "turn".into()],
+        river_method: "kmeans".into(),
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -49,6 +52,10 @@ fn parse_args() -> Args {
             "--fit-boards" => a.fit_boards = val.parse().expect("--fit-boards"),
             "--max-iters" => a.max_iters = val.parse().expect("--max-iters"),
             "--stages" => a.stages = val.split(',').map(|s| s.trim().to_string()).collect(),
+            "--river-method" => {
+                assert!(val == "kmeans" || val == "equal_mass", "--river-method kmeans|equal_mass");
+                a.river_method = val
+            }
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -141,7 +148,11 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     let t_hist = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
     // equal-mass cut-offs: exactly k buckets (1-D k-means merged coincident centroids)
-    let cuts = river_cutoffs_equal_mass(&hist, k);
+    let cuts = if a.river_method == "equal_mass" {
+        river_cutoffs_equal_mass(&hist, k)
+    } else {
+        river_cutoffs(&hist, k, 500)
+    };
     let t_fit = t1.elapsed().as_secs_f64();
     let mut mass = vec![0u64; cuts.len() + 1];
     for (bi, &w) in hist.iter().enumerate() {
@@ -159,7 +170,8 @@ fn river_stage(a: &Args, cfg: &AbstractionConfig, log: &mut Log) {
     };
     write_abs_file(&path, &h, &payload).expect("write river");
     log.line(format!(
-        "- river: equity histogram over 2,598,960 boards {t_hist:.1}s, equal-mass cut-offs {t_fit:.2}s, {} cut-offs ({} buckets)",
+        "- river: equity histogram over 2,598,960 boards {t_hist:.1}s, {} cut-offs {t_fit:.2}s, {} cut-offs ({} distinct buckets of {k} requested)",
+        a.river_method,
         cuts.len(),
         cuts.len() + 1
     ));

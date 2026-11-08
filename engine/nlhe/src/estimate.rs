@@ -29,12 +29,22 @@ pub struct ByteModel {
     pub regret_bytes: u64,
     pub avg_bytes: u64,
     pub index_bytes: u64,
+    /// Fraction of post-flop regret blocks allocated under first-use allocation
+    /// (1.0 = dense). Planning value: Pluribus encountered 413,507,309 of 664,845,654
+    /// action sequences (supplement p. 13) = 0.622.
+    pub postflop_alloc_fraction: f64,
+    /// Bytes per tree node (decision + terminal) for the explicit tree in the trainer:
+    /// node 24 + child index 4 + preflop avg offset 8 + regret block offset 8.
+    pub tree_node_bytes: u64,
 }
+
+pub const PLURIBUS_ALLOC_FRACTION: f64 = 413_507_309.0 / 664_845_654.0;
+pub const PLURIBUS_ACTION_SEQUENCES: u64 = 664_845_654;
 
 impl Default for ByteModel {
     fn default() -> Self {
         // i32 regrets and u32 average-strategy counts, as Pluribus stored them.
-        ByteModel { regret_bytes: 4, avg_bytes: 4, index_bytes: 8 }
+        ByteModel { regret_bytes: 4, avg_bytes: 4, index_bytes: 8, postflop_alloc_fraction: 1.0, tree_node_bytes: 0 }
     }
 }
 
@@ -94,13 +104,18 @@ pub fn estimate(counts: &TreeCounts, cfg: &AbstractionConfig, m: &ByteModel) -> 
             buckets: b,
             infosets: counts.nodes[s] * b,
             pairs,
-            regret_bytes: pairs * m.regret_bytes,
+            regret_bytes: if s == 0 {
+                pairs * m.regret_bytes
+            } else {
+                (pairs as f64 * m.regret_bytes as f64 * m.postflop_alloc_fraction).round() as u64
+            },
             avg_bytes: if cfg.avg_strategy_streets[s] { pairs * m.avg_bytes } else { 0 },
             table_bytes,
         }
     };
     let streets = [mk(0), mk(1), mk(2), mk(3)];
-    let index_bytes = counts.nodes.iter().sum::<u64>() * m.index_bytes;
+    let index_bytes = counts.nodes.iter().sum::<u64>() * m.index_bytes
+        + (counts.nodes.iter().sum::<u64>() + counts.terminals) * m.tree_node_bytes;
     let total_bytes = index_bytes
         + streets.iter().map(|s| s.regret_bytes + s.avg_bytes + s.table_bytes).sum::<u64>();
     Estimate { streets, index_bytes, total_bytes }
@@ -175,6 +190,18 @@ mod tests {
         c.buckets = [169, 256, 256, 256];
         let e = estimate(&counts(), &c, &ByteModel::default());
         assert_eq!(e.streets[3].table_bytes, 2_809_475_760); // 2.62 GiB at u8
+    }
+
+    #[test]
+    fn alloc_fraction_and_tree_bytes() {
+        let m = ByteModel { postflop_alloc_fraction: 0.5, tree_node_bytes: 44, ..ByteModel::default() };
+        let mut c = counts();
+        c.terminals = 1_000;
+        let e = estimate(&c, &cfg([169, 200, 200, 200]), &m);
+        assert_eq!(e.streets[0].regret_bytes, 30 * 169 * 4); // preflop always dense
+        assert_eq!(e.streets[3].regret_bytes, 25_000 * 200 * 2); // half of 4 bytes
+        assert_eq!(e.index_bytes, 11_110 * 8 + (11_110 + 1_000) * 44);
+        assert!((PLURIBUS_ALLOC_FRACTION - 0.622).abs() < 0.001);
     }
 
     #[test]

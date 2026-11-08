@@ -27,7 +27,8 @@ use cfr::rng::Rng;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 pub const DECISION: u8 = 0;
@@ -51,8 +52,6 @@ pub struct Tree {
     pub players: usize,
     pub nodes: Vec<TNode>,
     pub children: Vec<u32>,
-    /// regret offset per node (decision nodes)
-    pub roff: Vec<u64>,
     /// average-strategy offset per node (preflop decision nodes; u64::MAX otherwise)
     pub aoff: Vec<u64>,
     pub n_regrets: u64,
@@ -70,7 +69,6 @@ impl Tree {
             players: rules.players,
             nodes: Vec::new(),
             children: Vec::new(),
-            roff: Vec::new(),
             aoff: Vec::new(),
             n_regrets: 0,
             n_avg: 0,
@@ -81,13 +79,11 @@ impl Tree {
         let root = rules.root();
         t.add(rules, cfg, &root, DECISION);
         let (mut r, mut a) = (0u64, 0u64);
-        t.roff = vec![0; t.nodes.len()];
         t.aoff = vec![u64::MAX; t.nodes.len()];
         for (i, n) in t.nodes.iter().enumerate() {
             if n.kind != DECISION {
                 continue;
             }
-            t.roff[i] = r;
             r += n.n as u64 * buckets[n.street as usize] as u64;
             if n.street == 0 {
                 t.aoff[i] = a;
@@ -164,25 +160,163 @@ impl Tree {
     }
 }
 
+/// Regret storage with first-use allocation (supplement p. 4): preflop blocks are allocated
+/// up front; a post-flop node's block (actions x buckets i32) is allocated the first time
+/// the traverser updates it. Unallocated nodes read as zero regret (uniform strategy).
+/// Blocks live in a chunked arena (16 Mi slots = 64 MiB per chunk) that grows on demand.
 pub struct Storage {
-    pub regrets: Vec<AtomicI32>,
+    /// per tree node: physical base + 1 (0 = unallocated)
+    node_off: Vec<AtomicU64>,
+    chunks: Vec<AtomicPtr<AtomicI32>>,
+    next: Mutex<u64>,
+    allocated: AtomicU64,
     pub avg: Vec<AtomicU32>,
 }
 
+const CHUNK_BITS: u32 = 24;
+const CHUNK: u64 = 1 << CHUNK_BITS;
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        for c in &self.chunks {
+            let ptr = c.load(Ordering::Acquire);
+            if !ptr.is_null() {
+                // SAFETY: allocated in `alloc_chunk` as a boxed slice of CHUNK elements.
+                unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, CHUNK as usize))) };
+            }
+        }
+    }
+}
+
 impl Storage {
+    /// First-use allocation (paper): preflop allocated now, post-flop on first update.
     pub fn new(tree: &Tree) -> Self {
+        let st = Self::empty(tree);
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind == DECISION && nd.street == 0 {
+                st.ensure(tree, id as u32);
+            }
+        }
+        st
+    }
+
+    /// Everything allocated up front (the pre-M3-fidelity behaviour; for comparisons).
+    pub fn new_dense(tree: &Tree) -> Self {
+        let st = Self::empty(tree);
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind == DECISION {
+                st.ensure(tree, id as u32);
+            }
+        }
+        st
+    }
+
+    fn empty(tree: &Tree) -> Self {
+        // worst case: every block allocated, plus at most one block of padding per chunk
+        let max_chunks = (tree.n_regrets / CHUNK + 2) as usize * 2;
         Storage {
-            regrets: (0..tree.n_regrets).map(|_| AtomicI32::new(0)).collect(),
+            node_off: (0..tree.nodes.len()).map(|_| AtomicU64::new(0)).collect(),
+            chunks: (0..max_chunks).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
+            next: Mutex::new(0),
+            allocated: AtomicU64::new(0),
             avg: (0..tree.n_avg).map(|_| AtomicU32::new(0)).collect(),
         }
     }
 
-    /// Regret-matching strategy at (base, n).
+    fn alloc_chunk(&self, c: usize) {
+        if self.chunks[c].load(Ordering::Acquire).is_null() {
+            let v: Box<[AtomicI32]> = (0..CHUNK).map(|_| AtomicI32::new(0)).collect();
+            let ptr = Box::into_raw(v) as *mut AtomicI32;
+            self.chunks[c].store(ptr, Ordering::Release);
+        }
+    }
+
+    /// Physical base of a node's block, if allocated.
     #[inline]
-    pub fn current(&self, base: u64, n: usize, out: &mut [f64; MAX_A]) {
+    pub fn base(&self, node: u32) -> Option<u64> {
+        let v = self.node_off[node as usize].load(Ordering::Acquire);
+        if v == 0 {
+            None
+        } else {
+            Some(v - 1)
+        }
+    }
+
+    /// Physical base of a node's block, allocating it on first use.
+    pub fn ensure(&self, tree: &Tree, node: u32) -> u64 {
+        if let Some(b) = self.base(node) {
+            return b;
+        }
+        let nd = &tree.nodes[node as usize];
+        let size = nd.n as u64 * tree.buckets[nd.street as usize] as u64;
+        let mut next = self.next.lock().unwrap();
+        if let Some(b) = self.base(node) {
+            return b; // another thread won the race
+        }
+        if (*next % CHUNK) + size > CHUNK {
+            *next = (*next / CHUNK + 1) * CHUNK; // blocks never straddle chunks
+        }
+        let base = *next;
+        self.alloc_chunk((base >> CHUNK_BITS) as usize);
+        *next += size;
+        self.allocated.fetch_add(size, Ordering::Relaxed);
+        self.node_off[node as usize].store(base + 1, Ordering::Release);
+        base
+    }
+
+    #[inline]
+    pub fn slot(&self, phys: u64) -> &AtomicI32 {
+        let ptr = self.chunks[(phys >> CHUNK_BITS) as usize].load(Ordering::Acquire);
+        // SAFETY: phys lies in an allocated block; chunk pointers are never freed while
+        // `self` lives, and the chunk was published before the node offset.
+        unsafe { &*ptr.add((phys & (CHUNK - 1)) as usize) }
+    }
+
+    /// Regret slots allocated so far (excluding chunk padding).
+    pub fn allocated_slots(&self) -> u64 {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Physical slot range in use (including padding), for whole-table passes.
+    pub fn used_range(&self) -> u64 {
+        *self.next.lock().unwrap()
+    }
+
+    /// Regret at (node, bucket, action); 0 if the node is unallocated.
+    pub fn regret(&self, tree: &Tree, node: u32, bucket: usize, a: usize) -> i32 {
+        let n = tree.nodes[node as usize].n as usize;
+        self.base(node).map_or(0, |b| self.slot(b + (bucket * n + a) as u64).load(Ordering::Relaxed))
+    }
+
+    /// Set a regret (allocating the node). For tests and loaders.
+    pub fn set_regret(&self, tree: &Tree, node: u32, bucket: usize, a: usize, v: i32) {
+        let n = tree.nodes[node as usize].n as usize;
+        let b = self.ensure(tree, node);
+        self.slot(b + (bucket * n + a) as u64).store(v, Ordering::Relaxed);
+    }
+
+    /// All regrets in the logical dense layout (node order; zeros where unallocated).
+    pub fn export_dense(&self, tree: &Tree) -> Vec<i32> {
+        let mut out = Vec::with_capacity(tree.n_regrets as usize);
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind != DECISION {
+                continue;
+            }
+            let size = nd.n as usize * tree.buckets[nd.street as usize] as usize;
+            match self.base(id as u32) {
+                Some(b) => out.extend((0..size).map(|k| self.slot(b + k as u64).load(Ordering::Relaxed))),
+                None => out.extend(std::iter::repeat(0).take(size)),
+            }
+        }
+        out
+    }
+
+    /// Regret-matching strategy from `n` physical slots starting at `base`.
+    #[inline]
+    pub fn current_phys(&self, base: u64, n: usize, out: &mut [f64; MAX_A]) {
         let mut pos = 0.0;
         for a in 0..n {
-            let r = self.regrets[base as usize + a].load(Ordering::Relaxed);
+            let r = self.slot(base + a as u64).load(Ordering::Relaxed);
             let v = if r > 0 { r as f64 } else { 0.0 };
             out[a] = v;
             pos += v;
@@ -198,8 +332,22 @@ impl Storage {
         }
     }
 
+    /// Current (regret-matching) strategy at (node, bucket); uniform if unallocated.
+    #[inline]
+    pub fn current_at(&self, tree: &Tree, node: u32, bucket: usize, out: &mut [f64; MAX_A]) {
+        let n = tree.nodes[node as usize].n as usize;
+        match self.base(node) {
+            Some(b) => self.current_phys(b + (bucket * n) as u64, n, out),
+            None => {
+                for o in out.iter_mut().take(n) {
+                    *o = 1.0 / n as f64;
+                }
+            }
+        }
+    }
+
     /// Blueprint policy: preflop average strategy (falls back to current if unvisited),
-    /// post-flop current strategy (Pluribus kept no post-flop average).
+    /// post-flop current strategy (see `snapshot_*` for the paper's post-flop average).
     #[inline]
     pub fn policy(&self, tree: &Tree, node: u32, bucket: usize, out: &mut [f64; MAX_A]) {
         let nd = &tree.nodes[node as usize];
@@ -214,7 +362,7 @@ impl Storage {
                 return;
             }
         }
-        self.current(tree.roff[node as usize] + (bucket * n) as u64, n, out);
+        self.current_at(tree, node, bucket, out);
     }
 }
 
@@ -236,6 +384,9 @@ pub struct Schedule {
     /// `snapshot_every == 0` disables it.
     pub snapshot_after: u64,
     pub snapshot_every: u64,
+    /// Preflop average-strategy sampling starts here (paper p. 15: "after the initial 800
+    /// minutes"; Algorithm 1 itself starts at t = 0, see docs/deviations.md).
+    pub avg_start: u64,
 }
 
 impl Schedule {
@@ -255,6 +406,7 @@ impl Schedule {
             discount_base: 0,
             snapshot_after: f(800.0),
             snapshot_every: f(200.0),
+            avg_start: f(800.0),
         }
     }
 
@@ -272,29 +424,7 @@ impl Schedule {
             discount_base: 0,
             snapshot_after: u64::MAX,
             snapshot_every: 0,
-        }
-    }
-
-    /// The paper's schedule in minutes (prune after 200, discount every 10 until 400,
-    /// snapshots every 200 after 800), mapped to iterations after a warm-up of `10 * scale`
-    /// minutes that ended at iteration `warmup_iters`, at `iters_per_min` from then on.
-    /// The first discount (T = 10 min, k = 1) falls exactly at the end of the warm-up.
-    pub fn paper_minutes(warmup_iters: u64, iters_per_min: f64, strategy_interval: u64, scale: f64) -> Schedule {
-        let w = 10.0 * scale;
-        let at = |m: f64| warmup_iters + ((m * scale - w).max(0.0) * iters_per_min).round() as u64;
-        let span = |m: f64| ((m * scale * iters_per_min).round() as u64).max(1);
-        Schedule {
-            strategy_interval,
-            prune_after: at(200.0),
-            lcfr_until: at(400.0),
-            discount_every: span(10.0),
-            explore_prob: 0.05,
-            prune_c: cfr::intregret::PRUNE_THRESHOLD,
-            floor: cfr::intregret::REGRET_FLOOR,
-            prune_skip_river_and_terminal: true,
-            discount_base: warmup_iters.max(1),
-            snapshot_after: at(800.0),
-            snapshot_every: span(200.0),
+            avg_start: u64::MAX,
         }
     }
 
@@ -469,7 +599,7 @@ impl<'a> Trainer<'a> {
         let t0 = Instant::now();
         for i in 0..self.tree.players {
             d.deal(self.seed, t, i as u64, self.tree.players);
-            if t % self.sched.strategy_interval == 0 {
+            if t >= self.sched.avg_start && t % self.sched.strategy_interval == 0 {
                 self.update_strategy(0, i, d, ts);
             }
             let prune = t > self.sched.prune_after && d.rng.next_f64() >= self.sched.explore_prob;
@@ -492,7 +622,7 @@ impl<'a> Trainer<'a> {
         if p == i {
             let b = d.bucket(self.abs, p, 0, ts);
             let mut s = [0.0; MAX_A];
-            self.st.current(self.tree.roff[node as usize] + (b * n) as u64, n, &mut s);
+            self.st.current_at(self.tree, node, b, &mut s);
             let a = d.rng.sample_index(&s[..n]);
             self.st.avg[self.tree.aoff[node as usize] as usize + b * n + a].fetch_add(1, Ordering::Relaxed);
             self.update_strategy(self.tree.child(node, a), i, d, ts);
@@ -514,20 +644,22 @@ impl<'a> Trainer<'a> {
         let street = nd.street as usize;
         d.reached_river |= street == 3;
         let b = d.bucket(self.abs, p, street, ts);
-        let base = self.tree.roff[node as usize] + (b * n) as u64;
         let mut s = [0.0; MAX_A];
-        self.st.current(base, n, &mut s);
         if p != i {
+            // opponents only read: never allocates
+            self.st.current_at(self.tree, node, b, &mut s);
             let a = d.rng.sample_index(&s[..n]);
             return self.traverse(self.tree.child(node, a), i, prune, d, ts);
         }
+        let base = self.st.ensure(self.tree, node) + (b * n) as u64;
+        self.st.current_phys(base, n, &mut s);
         let mut va = [0.0; MAX_A];
         let mut explored = [true; MAX_A];
         let mut v = 0.0;
         for a in 0..n {
             let child = self.tree.child(node, a);
             if prune {
-                let r = self.st.regrets[base as usize + a].load(Ordering::Relaxed);
+                let r = self.st.slot(base + a as u64).load(Ordering::Relaxed);
                 let exempt = self.sched.prune_skip_river_and_terminal
                     && (street == 3 || self.tree.nodes[child as usize].kind != DECISION);
                 if r <= self.sched.prune_c && !exempt {
@@ -541,7 +673,7 @@ impl<'a> Trainer<'a> {
         }
         for a in 0..n {
             if explored[a] {
-                let cell = &self.st.regrets[base as usize + a];
+                let cell = self.st.slot(base + a as u64);
                 let mut r = cell.load(Ordering::Relaxed);
                 add_regret(&mut r, va[a] - v, self.sched.floor, &mut ts.regret);
                 cell.store(r, Ordering::Relaxed);
@@ -586,9 +718,11 @@ impl<'a> Trainer<'a> {
 
     /// Linear-CFR discount step k (d = k / (k + 1)) on all regrets and counts.
     pub fn discount(&self, k: u64, threads: usize) {
-        let r = &self.st.regrets;
-        crate::abstraction::parallel_chunks(r.len(), threads, 1 << 20, |a, b| {
-            for x in &r[a..b] {
+        let st = self.st;
+        let used = st.used_range() as usize;
+        crate::abstraction::parallel_chunks(used, threads, 1 << 20, |a, b| {
+            for i in a..b {
+                let x = st.slot(i as u64);
                 x.store(discount_regret(x.load(Ordering::Relaxed), k), Ordering::Relaxed);
             }
         });
@@ -604,7 +738,7 @@ impl<'a> Trainer<'a> {
 // ------------------------------------------------------------------ checkpoints
 
 const MAGIC: &[u8; 4] = b"PLBP";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CkptMeta {
@@ -656,14 +790,20 @@ pub fn save_checkpoint(path: &Path, meta: &CkptMeta, tree: &Tree, st: &Storage) 
         for x in [s.prune_c, s.floor, s.prune_skip_river_and_terminal as i32] {
             w.write_all(&x.to_le_bytes())?;
         }
-        for x in [s.discount_base, s.snapshot_after, s.snapshot_every, meta.snapshots] {
+        for x in [s.discount_base, s.snapshot_after, s.snapshot_every, meta.snapshots, s.avg_start] {
             w.write_all(&x.to_le_bytes())?;
         }
-        let mut buf = Vec::with_capacity(1 << 20);
-        for chunk in st.regrets.chunks(1 << 18) {
+        // v3: allocated blocks only, as (u32 node id, block) records in node order, streamed
+        let allocated: u64 = (0..tree.nodes.len() as u32).filter(|&id| st.base(id).is_some()).count() as u64;
+        w.write_all(&allocated.to_le_bytes())?;
+        let mut buf = Vec::with_capacity(1 << 16);
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            let Some(base) = st.base(id as u32) else { continue };
+            let size = nd.n as u64 * tree.buckets[nd.street as usize] as u64;
             buf.clear();
-            for x in chunk {
-                buf.extend_from_slice(&x.load(Ordering::Relaxed).to_le_bytes());
+            buf.extend_from_slice(&(id as u32).to_le_bytes());
+            for k in 0..size {
+                buf.extend_from_slice(&st.slot(base + k).load(Ordering::Relaxed).to_le_bytes());
             }
             h.feed(&buf);
             w.write_all(&buf)?;
@@ -695,7 +835,7 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
     }
     r.read_exact(&mut b4)?;
     let version = u32::from_le_bytes(b4);
-    if version != 1 && version != 2 {
+    if !(1..=3).contains(&version) {
         return Err(bad(format!("unsupported checkpoint version {version}")));
     }
     r.read_exact(&mut b4)?;
@@ -721,27 +861,63 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
         r.read_exact(&mut b4)?;
         *x = i32::from_le_bytes(b4);
     }
-    // v2: discount_base, snapshot_after, snapshot_every, snapshots (v1: none of these)
-    let mut v2 = [0u64; 4];
-    if version >= 2 {
-        for x in v2.iter_mut() {
-            r.read_exact(&mut b8)?;
-            *x = u64::from_le_bytes(b8);
-        }
+    // v2: discount_base, snapshot_after, snapshot_every, snapshots; v3: + avg_start
+    let mut v2 = [0u64; 5];
+    let nv2 = match version {
+        1 => 0,
+        2 => 4,
+        _ => 5,
+    };
+    for x in v2.iter_mut().take(nv2) {
+        r.read_exact(&mut b8)?;
+        *x = u64::from_le_bytes(b8);
     }
     if u[2] != tree.n_regrets || u[3] != tree.n_avg || buckets != tree.buckets {
         return Err(bad(format!("checkpoint shape {:?}/{}/{} does not match tree {:?}/{}/{}", buckets, u[2], u[3], tree.buckets, tree.n_regrets, tree.n_avg)));
     }
     let mut h = Fnv::new();
     let mut buf = vec![0u8; 1 << 20];
-    for chunk in st.regrets.chunks(1 << 18) {
-        let bytes = &mut buf[..chunk.len() * 4];
-        r.read_exact(bytes)?;
-        h.feed(bytes);
-        for (x, c) in chunk.iter().zip(bytes.chunks_exact(4)) {
-            x.store(i32::from_le_bytes([c[0], c[1], c[2], c[3]]), Ordering::Relaxed);
+    let mut fill_block = |r: &mut BufReader<File>, h: &mut Fnv, base: u64, size: u64| -> io::Result<()> {
+        let mut done = 0u64;
+        while done < size {
+            let m = (size - done).min(1 << 18);
+            let bytes = &mut buf[..m as usize * 4];
+            r.read_exact(bytes)?;
+            h.feed(bytes);
+            for (k, c) in bytes.chunks_exact(4).enumerate() {
+                st.slot(base + done + k as u64).store(i32::from_le_bytes([c[0], c[1], c[2], c[3]]), Ordering::Relaxed);
+            }
+            done += m;
+        }
+        Ok(())
+    };
+    if version <= 2 {
+        // dense layout: every decision node's block, in node order
+        for (id, nd) in tree.nodes.iter().enumerate() {
+            if nd.kind != DECISION {
+                continue;
+            }
+            let size = nd.n as u64 * tree.buckets[nd.street as usize] as u64;
+            let base = st.ensure(tree, id as u32);
+            fill_block(&mut r, &mut h, base, size)?;
+        }
+    } else {
+        r.read_exact(&mut b8)?;
+        let allocated = u64::from_le_bytes(b8);
+        for _ in 0..allocated {
+            r.read_exact(&mut b4)?;
+            h.feed(&b4);
+            let id = u32::from_le_bytes(b4);
+            let nd = tree.nodes.get(id as usize).ok_or_else(|| bad(format!("bad node id {id}")))?;
+            if nd.kind != DECISION {
+                return Err(bad(format!("node {id} is not a decision node")));
+            }
+            let size = nd.n as u64 * tree.buckets[nd.street as usize] as u64;
+            let base = st.ensure(tree, id);
+            fill_block(&mut r, &mut h, base, size)?;
         }
     }
+    let mut buf = vec![0u8; 1 << 20];
     for chunk in st.avg.chunks(1 << 18) {
         let bytes = &mut buf[..chunk.len() * 4];
         r.read_exact(bytes)?;
@@ -772,6 +948,7 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
             discount_base: v2[0],
             snapshot_after: if version >= 2 { v2[1] } else { u64::MAX },
             snapshot_every: v2[2],
+            avg_start: if version >= 3 { v2[4] } else { 0 },
         },
         snapshots: v2[3],
     })
@@ -779,105 +956,179 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
 
 // ------------------------------------------------------------------ post-flop snapshots
 
-const SNAP_MAGIC: &[u8; 4] = b"PLSN";
+const SNAP_MAGIC: &[u8; 4] = b"PLS2";
 
-/// Quantised regret-matching strategy (sum = ~65535) at one infoset.
+/// Quantised regret-matching strategy (sum ~ 65535) at (node, bucket); uniform if unallocated.
 #[inline]
-fn quantised_current(st: &Storage, base: u64, n: usize, out: &mut [u32; MAX_A]) {
+fn quantised_current(st: &Storage, tree: &Tree, node: u32, bucket: usize, out: &mut [u32; MAX_A]) {
+    let n = tree.nodes[node as usize].n as usize;
     let mut s = [0.0; MAX_A];
-    st.current(base, n, &mut s);
+    st.current_at(tree, node, bucket, &mut s);
     for a in 0..n {
         out[a] = (s[a] * 65_535.0).round() as u32;
     }
 }
 
-/// Add one snapshot of the post-flop current strategy to the running-sum file at `path`
-/// (u32 per regret slot; preflop slots stay 0). Streams the old file into a new one and
-/// renames, so no table-sized buffer is allocated and a crash leaves the old file intact.
-/// Returns the number of snapshots now in the file.
-pub fn snapshot_add(path: &Path, tree: &Tree, st: &Storage) -> io::Result<u64> {
-    let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
-    let mut old = match File::open(path) {
+struct SnapReader {
+    r: BufReader<File>,
+    remaining: u64,
+}
+
+impl SnapReader {
+    /// Next record: (node, snapshots included, sums), or None at the end.
+    fn next(&mut self, tree: &Tree) -> io::Result<Option<(u32, u32, Vec<u32>)>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        self.remaining -= 1;
+        let mut b4 = [0u8; 4];
+        self.r.read_exact(&mut b4)?;
+        let node = u32::from_le_bytes(b4);
+        self.r.read_exact(&mut b4)?;
+        let cnt = u32::from_le_bytes(b4);
+        let nd = &tree.nodes[node as usize];
+        let size = nd.n as usize * tree.buckets[nd.street as usize] as usize;
+        let mut v = vec![0u32; size];
+        for x in v.iter_mut() {
+            self.r.read_exact(&mut b4)?;
+            *x = u32::from_le_bytes(b4);
+        }
+        Ok(Some((node, cnt, v)))
+    }
+}
+
+fn snap_open(path: &Path, tree: &Tree) -> io::Result<Option<(SnapReader, u64)>> {
+    let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
+    match File::open(path) {
         Ok(f) => {
             let mut r = BufReader::with_capacity(1 << 22, f);
             let mut b4 = [0u8; 4];
             let mut b8 = [0u8; 8];
             r.read_exact(&mut b4)?;
             if &b4 != SNAP_MAGIC {
-                return Err(bad("bad snapshot magic".into()));
+                return Err(bad("bad snapshot magic"));
             }
             r.read_exact(&mut b8)?;
-            if u64::from_le_bytes(b8) != tree.n_regrets {
-                return Err(bad("snapshot file does not match the tree".into()));
+            if u64::from_le_bytes(b8) != tree.nodes.len() as u64 {
+                return Err(bad("snapshot file does not match the tree"));
             }
             r.read_exact(&mut b8)?;
-            Some((r, u64::from_le_bytes(b8)))
+            let total = u64::from_le_bytes(b8);
+            r.read_exact(&mut b8)?;
+            let records = u64::from_le_bytes(b8);
+            Ok(Some((SnapReader { r, remaining: records }, total)))
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    let count = old.as_ref().map_or(0, |o| o.1) + 1;
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Add one snapshot of the post-flop current strategy (paper p. 15) to the sparse
+/// running-sum file at `path`. Records exist for post-flop nodes that are allocated now or
+/// were recorded before; each record stores how many snapshots it includes, so nodes first
+/// allocated later are averaged with uniform for the snapshots they missed. Streams the old
+/// file into a new one and renames (crash-safe, no table-sized buffer).
+/// Returns the total number of snapshots.
+pub fn snapshot_add(path: &Path, tree: &Tree, st: &Storage) -> io::Result<u64> {
+    let mut old = snap_open(path, tree)?;
+    let total = old.as_ref().map_or(0, |o| o.1) + 1;
     let tmp = path.with_extension("tmp");
+    let mut records: Vec<u32> = Vec::new(); // node ids written (counted at the end)
     {
         let mut w = BufWriter::with_capacity(1 << 22, File::create(&tmp)?);
         w.write_all(SNAP_MAGIC)?;
-        w.write_all(&tree.n_regrets.to_le_bytes())?;
-        w.write_all(&count.to_le_bytes())?;
+        w.write_all(&(tree.nodes.len() as u64).to_le_bytes())?;
+        w.write_all(&total.to_le_bytes())?;
+        w.write_all(&0u64.to_le_bytes())?; // record count, patched below
+        let mut pending = match old.as_mut() {
+            Some((rd, _)) => rd.next(tree)?,
+            None => None,
+        };
         let mut q = [0u32; MAX_A];
-        let mut inb = [0u8; 4 * MAX_A];
         for (id, nd) in tree.nodes.iter().enumerate() {
-            if nd.kind != DECISION {
+            if nd.kind != DECISION || nd.street == 0 {
+                continue;
+            }
+            let id = id as u32;
+            let prev = if pending.as_ref().is_some_and(|p| p.0 == id) {
+                let p = pending.take();
+                pending = match old.as_mut() {
+                    Some((rd, _)) => rd.next(tree)?,
+                    None => None,
+                };
+                p
+            } else {
+                None
+            };
+            if prev.is_none() && st.base(id).is_none() {
                 continue;
             }
             let n = nd.n as usize;
             let nb = tree.buckets[nd.street as usize] as usize;
+            let (cnt, mut sums) = match prev {
+                Some((_, c, v)) => (c, v),
+                None => (0, vec![0u32; n * nb]),
+            };
             for b in 0..nb {
-                if nd.street == 0 {
-                    q[..n].iter_mut().for_each(|x| *x = 0);
-                } else {
-                    quantised_current(st, tree.roff[id] + (b * n) as u64, n, &mut q);
-                }
-                if let Some((r, _)) = old.as_mut() {
-                    r.read_exact(&mut inb[..4 * n])?;
-                    for a in 0..n {
-                        q[a] += u32::from_le_bytes([inb[4 * a], inb[4 * a + 1], inb[4 * a + 2], inb[4 * a + 3]]);
-                    }
-                }
-                for &x in &q[..n] {
-                    w.write_all(&x.to_le_bytes())?;
+                quantised_current(st, tree, id, b, &mut q);
+                for a in 0..n {
+                    sums[b * n + a] += q[a];
                 }
             }
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(&(cnt + 1).to_le_bytes())?;
+            for x in &sums {
+                w.write_all(&x.to_le_bytes())?;
+            }
+            records.push(id);
         }
         w.flush()?;
-        w.get_ref().sync_all()?;
+        let mut f = w.into_inner().map_err(|e| e.into_error())?;
+        use std::io::{Seek, SeekFrom};
+        f.seek(SeekFrom::Start(4 + 8 + 8))?;
+        f.write_all(&(records.len() as u64).to_le_bytes())?;
+        f.sync_all()?;
     }
     drop(old);
     fs::rename(&tmp, path)?;
-    Ok(count)
+    Ok(total)
 }
 
-/// Load a snapshot-sum file fully (for evaluation). Returns (sums, count).
-pub fn snapshot_load(path: &Path, tree: &Tree) -> io::Result<(Vec<u32>, u64)> {
-    let mut r = BufReader::with_capacity(1 << 22, File::open(path)?);
-    let mut b4 = [0u8; 4];
-    let mut b8 = [0u8; 8];
-    r.read_exact(&mut b4)?;
-    r.read_exact(&mut b8)?;
-    if &b4 != SNAP_MAGIC || u64::from_le_bytes(b8) != tree.n_regrets {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad snapshot file"));
+/// Post-flop snapshot average loaded for evaluation.
+pub struct SnapshotAverage {
+    pub total: u64,
+    pub recs: cfr::fxhash::FxHashMap<u32, (u32, Vec<u32>)>,
+}
+
+impl SnapshotAverage {
+    pub fn load(path: &Path, tree: &Tree) -> io::Result<Self> {
+        let (mut rd, total) = snap_open(path, tree)?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no snapshot file"))?;
+        let mut recs = cfr::fxhash::FxHashMap::default();
+        while let Some((id, c, v)) = rd.next(tree)? {
+            recs.insert(id, (c, v));
+        }
+        Ok(SnapshotAverage { total, recs })
     }
-    r.read_exact(&mut b8)?;
-    let count = u64::from_le_bytes(b8);
-    let mut sums = vec![0u32; tree.n_regrets as usize];
-    let mut buf = vec![0u8; 1 << 20];
-    for chunk in sums.chunks_mut(1 << 18) {
-        let bytes = &mut buf[..chunk.len() * 4];
-        r.read_exact(bytes)?;
-        for (x, c) in chunk.iter_mut().zip(bytes.chunks_exact(4)) {
-            *x = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+
+    /// Averaged post-flop strategy at (node, bucket): missing snapshots count as uniform.
+    pub fn policy(&self, tree: &Tree, node: u32, bucket: usize, out: &mut [f64; MAX_A]) {
+        let n = tree.nodes[node as usize].n as usize;
+        let uni = 65_535.0 / n as f64;
+        match self.recs.get(&node) {
+            Some((c, v)) => {
+                let missing = (self.total - *c as u64) as f64;
+                let mut sum = 0.0;
+                for a in 0..n {
+                    out[a] = v[bucket * n + a] as f64 + missing * uni;
+                    sum += out[a];
+                }
+                for o in out.iter_mut().take(n) {
+                    *o /= sum;
+                }
+            }
+            None => out.iter_mut().take(n).for_each(|o| *o = 1.0 / n as f64),
         }
     }
-    Ok((sums, count))
 }
 
 // ------------------------------------------------------------------ metrics
@@ -899,12 +1150,15 @@ pub fn regret_summary(tree: &Tree, st: &Storage) -> RegretSummary {
         let street = nd.street as usize;
         let n = nd.n as usize;
         let nb = tree.buckets[street] as usize;
-        let base = tree.roff[i] as usize;
+        let Some(base) = st.base(i as u32) else {
+            s.infosets[street] += nb as u64;
+            continue;
+        };
         for b in 0..nb {
             let mut any = false;
             let mut pos = 0i64;
             for a in 0..n {
-                let r = st.regrets[base + b * n + a].load(Ordering::Relaxed);
+                let r = st.slot(base + (b * n + a) as u64).load(Ordering::Relaxed);
                 any |= r != 0;
                 pos += r.max(0) as i64;
             }
@@ -1051,6 +1305,7 @@ mod tests {
             discount_base: 0,
             snapshot_after: u64::MAX,
             snapshot_every: 0,
+            avg_start: 0,
         }
     }
 
@@ -1124,16 +1379,10 @@ mod tests {
                     tr2.discount(k, 1);
                 }
             }
-            return (
-                st2.regrets.iter().map(|x| x.load(Ordering::Relaxed)).collect(),
-                st2.avg.iter().map(|x| x.load(Ordering::Relaxed)).collect(),
-            );
+            return (st2.export_dense(&tree), st2.avg.iter().map(|x| x.load(Ordering::Relaxed)).collect());
         }
         step(iters, &mut t);
-        (
-            st.regrets.iter().map(|x| x.load(Ordering::Relaxed)).collect(),
-            st.avg.iter().map(|x| x.load(Ordering::Relaxed)).collect(),
-        )
+        (st.export_dense(&tree), st.avg.iter().map(|x| x.load(Ordering::Relaxed)).collect())
     }
 
     #[test]
@@ -1180,40 +1429,34 @@ mod tests {
         let abs = StrengthAbstraction { k: 4 };
         let tree = Tree::build(&rules, &cfg, abs.buckets());
         let st = Storage::new(&tree);
-        st.regrets[0].store(7, Ordering::Relaxed);
-        st.regrets[1].store(-5, Ordering::Relaxed);
+        st.set_regret(&tree, 0, 0, 0, 7);
+        st.set_regret(&tree, 0, 0, 1, -5);
         st.avg[0].store(9, Ordering::Relaxed);
         let sc = sched();
         Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 0 }.discount(1, 2);
-        assert_eq!(st.regrets[0].load(Ordering::Relaxed), 4); // 3.5 -> 4 (half-even)
-        assert_eq!(st.regrets[1].load(Ordering::Relaxed), -2); // -2.5 -> -2
+        assert_eq!(st.regret(&tree, 0, 0, 0), 4); // 3.5 -> 4 (half-even)
+        assert_eq!(st.regret(&tree, 0, 0, 1), -2); // -2.5 -> -2
         assert_eq!(st.avg[0].load(Ordering::Relaxed), 4); // 4.5 -> 4
     }
 
     #[test]
-    fn paper_schedule_boundaries() {
-        // warm-up ended at iteration 1,000; 100 iterations per minute afterwards
-        let s = Schedule::paper_minutes(1_000, 100.0, 10_000, 1.0);
-        assert_eq!(s.discount_every, 1_000); // 10 minutes
-        assert_eq!(s.discount_k(1_000), Some(1)); // T = 10 min, end of warm-up
-        assert_eq!(s.discount_k(2_000), Some(2));
-        assert_eq!(s.discount_k(1_500), None);
-        assert_eq!(s.prune_after, 1_000 + 190 * 100); // 200 min
-        assert_eq!(s.lcfr_until, 1_000 + 390 * 100); // 400 min
-        assert_eq!(s.discount_k(s.lcfr_until), None); // t < LCFR threshold only
-        assert_eq!(s.discount_k(s.lcfr_until - 1_000), Some(39)); // T = 390 min
-        assert_eq!(s.next_discount(0), Some(1_000));
-        assert_eq!(s.next_discount(1_000), Some(2_000));
-        assert_eq!(s.next_discount(s.lcfr_until - 1_000), None);
-        assert_eq!(s.snapshot_after, 1_000 + 790 * 100); // 800 min
-        assert_eq!(s.snapshot_every, 20_000); // 200 min
-        assert!(s.snapshot_due(s.snapshot_after) && s.snapshot_due(s.snapshot_after + 20_000));
-        assert_eq!(s.next_snapshot(s.snapshot_after), Some(s.snapshot_after + 20_000));
-        // old-style schedule (base 0): boundaries at multiples, k = t / every
-        let o = Schedule { discount_base: 0, discount_every: 100, lcfr_until: 1_000, ..s.clone() };
-        assert_eq!(o.discount_k(100), Some(1));
-        assert_eq!(o.discount_k(300), Some(3));
-        assert_eq!(o.next_discount(0), Some(100));
+    fn paper_fraction_schedule_boundaries() {
+        // "paper minute" = planned run / 11,520
+        let s = Schedule::pluribus_scaled(11_520_000, 10_000); // 1,000 iterations per paper minute
+        assert_eq!(s.discount_every, 10_000);
+        assert_eq!(s.prune_after, 200_000);
+        assert_eq!(s.lcfr_until, 400_000);
+        assert_eq!(s.avg_start, 800_000);
+        assert_eq!(s.snapshot_after, 800_000);
+        assert_eq!(s.snapshot_every, 200_000);
+        assert_eq!(s.discount_k(10_000), Some(1));
+        assert_eq!(s.discount_k(390_000), Some(39));
+        assert_eq!(s.discount_k(400_000), None); // t < LCFR threshold only
+        assert_eq!(s.next_discount(0), Some(10_000));
+        assert_eq!(s.next_discount(390_000), None);
+        assert!(s.snapshot_due(800_000) && s.snapshot_due(1_000_000) && !s.snapshot_due(900_000));
+        assert_eq!(s.next_snapshot(800_000), Some(1_000_000));
+        assert!(s.prune_skip_river_and_terminal);
         assert!(Schedule::warmup(10_000).discount_k(5).is_none());
     }
 
@@ -1233,7 +1476,7 @@ mod tests {
                 for b in 0..tree.buckets[nd.street as usize] as usize {
                     for a in 0..n {
                         if select(id, a) {
-                            st.regrets[tree.roff[id] as usize + b * n + a].store(-1_500_000_000, Ordering::Relaxed);
+                            st.set_regret(&tree, id as u32, b, a, -1_500_000_000);
                         }
                     }
                 }
@@ -1273,38 +1516,88 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bp_snap_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("snap.bin");
-        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 1);
-        let first: Vec<i32> = st.regrets.iter().map(|x| x.load(Ordering::Relaxed)).collect();
-        tr.run(300, 600, 1, &AtomicBool::new(false));
-        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 2);
-        let (sums, count) = snapshot_load(&path, &tree).unwrap();
-        assert_eq!(count, 2);
-        // check every infoset: sum = q(first) + q(second); preflop slots are 0
-        let snap1 = Storage::new(&tree);
-        for (x, &v) in snap1.regrets.iter().zip(&first) {
-            x.store(v, Ordering::Relaxed);
-        }
-        let mut q1 = [0u32; MAX_A];
-        let mut q2 = [0u32; MAX_A];
+        // remember snapshot 1's quantised strategies for allocated post-flop nodes
+        let mut first = std::collections::HashMap::new();
+        let mut q = [0u32; MAX_A];
         for (id, nd) in tree.nodes.iter().enumerate() {
-            if nd.kind != DECISION {
-                continue;
+            if nd.kind == DECISION && nd.street > 0 && st.base(id as u32).is_some() {
+                let n = nd.n as usize;
+                let mut v = Vec::new();
+                for b in 0..4 {
+                    quantised_current(&st, &tree, id as u32, b, &mut q);
+                    v.extend_from_slice(&q[..n]);
+                }
+                first.insert(id as u32, v);
             }
+        }
+        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 1);
+        tr.run(300, 900, 1, &AtomicBool::new(false));
+        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 2);
+        let avg = SnapshotAverage::load(&path, &tree).unwrap();
+        assert_eq!(avg.total, 2);
+        let mut grew = 0;
+        for (id, (cnt, sums)) in &avg.recs {
+            let nd = &tree.nodes[*id as usize];
             let n = nd.n as usize;
-            for b in 0..tree.buckets[nd.street as usize] as usize {
-                let base = tree.roff[id] + (b * n) as u64;
+            assert!(nd.street > 0);
+            for b in 0..4 {
+                quantised_current(&st, &tree, *id, b, &mut q);
                 for a in 0..n {
-                    let got = sums[base as usize + a];
-                    if nd.street == 0 {
-                        assert_eq!(got, 0);
-                    } else {
-                        quantised_current(&snap1, base, n, &mut q1);
-                        quantised_current(&st, base, n, &mut q2);
-                        assert_eq!(got, q1[a] + q2[a]);
-                    }
+                    let want = q[a] + first.get(id).map_or(0, |v| v[b * n + a]);
+                    assert_eq!(sums[b * n + a], want);
                 }
             }
+            assert_eq!(*cnt, if first.contains_key(id) { 2 } else { 1 });
+            grew += (*cnt == 1) as u32;
         }
+        assert_eq!(avg.recs.len(), first.len() + grew as usize);
+        // a node first allocated after snapshot 1 is averaged with uniform for snapshot 1
+        let mut out = [0.0; MAX_A];
+        if let Some((id, _)) = avg.recs.iter().find(|(_, (c, _))| *c == 1) {
+            avg.policy(&tree, *id, 0, &mut out);
+            let n = tree.nodes[*id as usize].n as usize;
+            assert!((out[..n].iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn first_use_allocation_saves_memory_and_matches_dense() {
+        let (rules, cfg) = small();
+        let abs = StrengthAbstraction { k: 4 };
+        let tree = Tree::build(&rules, &cfg, abs.buckets());
+        let lazy = Storage::new(&tree);
+        let dense = Storage::new_dense(&tree);
+        let pre: u64 = tree.n_avg / 169 * 169; // preflop regret slots = preflop avg slots
+        assert_eq!(lazy.allocated_slots(), pre);
+        assert_eq!(dense.allocated_slots(), tree.n_regrets);
+        let sc = sched();
+        Trainer { tree: &tree, st: &lazy, abs: &abs, sched: &sc, seed: 6 }.run(0, 500, 1, &AtomicBool::new(false));
+        Trainer { tree: &tree, st: &dense, abs: &abs, sched: &sc, seed: 6 }.run(0, 500, 1, &AtomicBool::new(false));
+        // identical training (allocation never changes values) ...
+        assert_eq!(lazy.export_dense(&tree), dense.export_dense(&tree));
+        // ... with fewer slots allocated
+        assert!(lazy.allocated_slots() < tree.n_regrets, "{} of {}", lazy.allocated_slots(), tree.n_regrets);
+    }
+
+    #[test]
+    fn dense_v2_checkpoint_loads_into_lazy_storage() {
+        // checkpoints from before first-use allocation stored every block in node order
+        let (rules, cfg) = small();
+        let abs = StrengthAbstraction { k: 4 };
+        let tree = Tree::build(&rules, &cfg, abs.buckets());
+        let st = Storage::new(&tree);
+        let sc = sched();
+        Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 8 }.run(0, 200, 1, &AtomicBool::new(false));
+        let dir = std::env::temp_dir().join(format!("bp_v3_{}", std::process::id()));
+        let path = dir.join("c.ckpt");
+        let meta = CkptMeta { config: "t".into(), buckets: tree.buckets, iteration: 200, seed: 8, elapsed_secs: 1.0, sched: sc.clone(), snapshots: 0 };
+        let bytes = save_checkpoint(&path, &meta, &tree, &st).unwrap();
+        let st2 = Storage::new(&tree);
+        assert_eq!(load_checkpoint(&path, &tree, &st2).unwrap(), meta);
+        assert_eq!(st2.export_dense(&tree), st.export_dense(&tree));
+        // sparse file is smaller than a dense one would be
+        assert!(bytes < 4 * (tree.n_regrets + tree.n_avg));
         fs::remove_dir_all(dir).ok();
     }
 

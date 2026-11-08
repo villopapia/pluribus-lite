@@ -4,7 +4,7 @@
 
 use nlhe::betting::{Rules, TreeCounter};
 use nlhe::config::{AbstractionConfig, STREETS};
-use nlhe::estimate::{estimate, max_equal_buckets, ByteModel, GIB};
+use nlhe::estimate::{estimate, max_equal_buckets, ByteModel, GIB, PLURIBUS_ACTION_SEQUENCES, PLURIBUS_ALLOC_FRACTION};
 use std::time::Instant;
 
 fn fmt(n: u64) -> String {
@@ -27,6 +27,7 @@ fn main() {
             .unwrap_or_else(|e| panic!("{p}: {e}"));
         let t0 = Instant::now();
         let mut tc = TreeCounter::new(Rules::default(), &cfg);
+        tc.evict_when_full = true; // exact either way; eviction only costs time
         let counts = match tc.count() {
             Ok(c) => c,
             Err(e) => {
@@ -37,7 +38,12 @@ fn main() {
         let secs = t0.elapsed().as_secs_f64();
         let e = estimate(&counts, &cfg, &m);
         println!("\n## {} ({p})", cfg.name);
-        println!("counted in {secs:.1}s, {} distinct betting states memoised\n", fmt(tc.memo_len() as u64));
+        println!(
+            "counted in {secs:.1}s ({} terminal histories), memo {} states at the end, {} evictions\n",
+            fmt(counts.terminals),
+            fmt(tc.memo_len() as u64),
+            tc.evictions
+        );
         println!("| street | betting nodes | actions (sum) | avg actions | buckets | infosets | (infoset,action) pairs | regret GiB | avg-strategy GiB | bucket table MiB |");
         println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
         for (i, s) in e.streets.iter().enumerate() {
@@ -63,11 +69,27 @@ fn main() {
             fmt(e.pairs()),
             e.index_bytes as f64 / GIB
         );
-        println!("\n**Estimated blueprint memory: {:.2} GiB**", e.total_gib());
+        println!("\n**Dense estimate (regrets + preflop average + tables + node index): {:.2} GiB**", e.total_gib());
+        let actions: u64 = counts.actions.iter().sum();
+        println!(
+            "- action sequences (history, action pairs): {} = {:.2}x Pluribus' {} (supplement p. 13)",
+            fmt(actions),
+            actions as f64 / PLURIBUS_ACTION_SEQUENCES as f64,
+            fmt(PLURIBUS_ACTION_SEQUENCES)
+        );
+        let lazy = ByteModel { postflop_alloc_fraction: PLURIBUS_ALLOC_FRACTION, tree_node_bytes: 44, ..m };
+        let el = estimate(&counts, &cfg, &lazy);
+        println!(
+            "- **first-use allocation** at Pluribus' encountered share {:.3}, plus the explicit tree ({} nodes x 44 B): **{:.2} GiB**; fits in 0.5 TB (465.66 GiB): {}",
+            PLURIBUS_ALLOC_FRACTION,
+            fmt(counts.nodes.iter().sum::<u64>() + counts.terminals),
+            el.total_gib(),
+            if el.total_gib() <= 500e9 / GIB { "yes" } else { "no" }
+        );
         for budget in [11.0, 26.0] {
-            match max_equal_buckets(&counts, &cfg, &m, (budget * GIB) as u64) {
-                Some(b) => println!("- max equal post-flop buckets within {budget} GiB: {b}"),
-                None => println!("- does not fit in {budget} GiB even with 1 bucket"),
+            match max_equal_buckets(&counts, &cfg, &lazy, (budget * GIB) as u64) {
+                Some(b) => println!("- max equal post-flop buckets within {budget} GiB (first-use model): {b}"),
+                None => println!("- does not fit in {budget} GiB (first-use model) even with 1 bucket"),
             }
         }
     }
