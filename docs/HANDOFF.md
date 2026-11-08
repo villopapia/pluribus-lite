@@ -91,6 +91,10 @@ close programs, delete STOP and start the task.
    D-ALG-9 ablations.
 6. **M4 search** per `fidelity_spec.md` §4.
 7. Housekeeping: delete legacy abstractions `m2_11g`, `k200` if not needed.
+8. **Pin the Dell's Python env (light job, OK while the run goes):** run
+   `analysis\.venv\Scripts\python -m pip freeze` on the Dell and compare it with
+   `analysis/requirements.lock` (made on the MSI 2026-11-08: Python 3.13.17, pokerkit 0.7.7,
+   latest pandas/pyarrow/matplotlib/numpy/pytest), then pin both machines to the same versions.
 
 Closed today: disk-safe I/O (task 1), OCHS river table + benchmark (task 2), Data S1
 cross-check (task 3), auto-resume task (task 4).
