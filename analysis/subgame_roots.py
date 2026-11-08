@@ -8,6 +8,8 @@ and each seat's total contribution. Seats p1..p6 = our seats 0..5 (p1 = small bl
 
 Output: data/subgame_roots.tsv with columns
   hand_id  street  folded_mask  t0 .. t5        (street: 1 flop, 2 turn, 3 river)
+and data/preflop_lines.tsv (for the preflop search trigger, D-SRCH-14):
+  hand_id  pluribus_seat  actions               (preflop actions "p3 f,p4 cbr 225,...")
 
 Usage:  .venv/Scripts/python subgame_roots.py [--data-dir ../data]
 """
@@ -55,21 +57,34 @@ def roots_of(actions: list[str], bot_seat: int, n: int = 6) -> list[tuple[int, i
     return out
 
 
+def preflop_actions(actions: list[str]) -> list[str]:
+    """Player actions before the flop is dealt (hole-card deals dropped)."""
+    out = []
+    for a in actions:
+        if a.startswith("d db"):
+            break
+        if not a.startswith("d "):
+            out.append(a)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     here = Path(__file__).resolve().parent
     ap.add_argument("--data-dir", type=Path, default=here.parent / "data")
     args = ap.parse_args(argv)
     files = hand_files(args.data_dir / "phh-dataset" / "data" / "pluribus")
-    rows = []
+    rows, pre = [], []
     for f in files:
         h = tomllib.loads(f.read_text(encoding="utf-8"))
         seat = h["players"].index("Pluribus")
+        pre.append(f"{f.parent.name}/{f.stem}\t{seat}\t" + ",".join(preflop_actions(h["actions"])))
         for street, folded, total in roots_of(h["actions"], seat):
             rows.append(f"{f.parent.name}/{f.stem}\t{street}\t{folded}\t" + "\t".join(map(str, total)))
     out = args.data_dir / "subgame_roots.tsv"
     out.write_text("hand_id\tstreet\tfolded_mask\tt0\tt1\tt2\tt3\tt4\tt5\n" + "\n".join(rows) + "\n", encoding="utf-8")
-    print(f"{len(files)} hands -> {len(rows)} post-flop subgame roots in {out}")
+    (args.data_dir / "preflop_lines.tsv").write_text("hand_id\tpluribus_seat\tactions\n" + "\n".join(pre) + "\n", encoding="utf-8")
+    print(f"{len(files)} hands -> {len(rows)} post-flop subgame roots in {out}; preflop lines in preflop_lines.tsv")
     return 0
 
 

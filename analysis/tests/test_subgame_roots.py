@@ -26,3 +26,9 @@ def test_roots_track_contributions_folds_and_streets():
 def test_no_root_when_fewer_than_two_players_can_act():
     acts = ["p3 cbr 10000", "p4 f", "p5 f", "p6 f", "p1 f", "p2 cc", "d db 2c3d4h", "d db 5s", "d db 6s"]
     assert roots_of(acts, bot_seat=1) == []
+
+
+def test_preflop_actions_stop_at_the_flop_and_drop_deals():
+    from subgame_roots import preflop_actions
+    acts = ["d dh p1 3c9s", "p3 f", "p4 cbr 225", "p1 cc", "d db 2c3d4h", "p1 cc"]
+    assert preflop_actions(acts) == ["p3 f", "p4 cbr 225", "p1 cc"]

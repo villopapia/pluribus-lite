@@ -173,6 +173,35 @@ HU {0.5, 0.75, 1, 1.5, 2} / {0.5, 0.75, 1, 1.5, 2}; river MW {0.5} / {0.5}; dept
 streets: heads-up {1} for the first bet, all-in for raises; multiway all-in only. Open: 4-way
 turns stay above 2,000 even at the minimum (11 roots). Preflop: §2.2.
 
+### 2.2 Preflop search: how often, and how large (D-SRCH-14)
+
+**Paper.** Preflop search only when an opponent's raise is more than $100 away from every
+blueprint raise size and no more than four players remain (p. 15); the subgame starts at the
+beginning of the round (pp. 20–21) and ends at the flop (p. 21).
+
+**Measured on the 10,000 logged hands** (`engine/nlhe/src/bin/preflop_search.rs`; opponents'
+preflop raises replayed with the betting rules, blueprint raise-to amounts at the actual state,
+all-in included; ≤ 4 players counted after the raise, Pluribus still in):
+
+| blueprint sizes | off-tree opponent raises | triggers (hands) | players left 2 / 3 / 4 | distance to nearest size (median / p90) |
+|---|---:|---:|---|---|
+| `faithful.cfg` | 488 | **125 (1.25%)** | 69 / 40 / 16 | $139 / $225 |
+| `pilot_dell_fit11.cfg` | 2,093 | 623 (6.2%) | 179 / 257 / 201 | $8,950 / $9,300 (its 3-bets are all-in only) |
+
+**The folded-players ambiguity.** When the trigger fires, ≥ 2 players have already folded, but
+the root is the start of the round. Reading (i) keeps every player's decisions from the start of
+the hand; reading (ii) fixes the players who folded to "fold". Subgame size at the 125 faithful
+triggers (search sizes `search_root.cfg`; Algorithm 2's added off-tree action not counted):
+
+| reading | action sequences |
+|---|---|
+| (i) full round | 245,817 at every trigger |
+| (ii) folded players fixed | median 67, max 7,219; 32.8% in [100, 2,000] (24 distinct folded sets) |
+
+Neither lands in the paper's range with the current preflop search sizes ({0.4} open, {2} 3-bet,
+{1} later); (ii) is far closer. Stage 6 will choose the reading and re-calibrate the preflop search
+sizes under it.
+
 ## 3. Leaves: continuation strategies (stage 3)
 
 **Paper (pp. 23–24).** At a leaf, "each player still in the hand simultaneously chooses one of

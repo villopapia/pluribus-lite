@@ -84,6 +84,9 @@ pub struct Subgame {
     /// set when `build_capped` stopped expanding at its node cap (the tree is then incomplete)
     pub truncated: bool,
     cap: usize,
+    /// seats whose decisions are forced folds (fold if legal, else check): the preflop
+    /// "folded players fixed" reading of a round-start root (D-SRCH-14)
+    pub forced_fold: u8,
 }
 
 impl Subgame {
@@ -95,13 +98,23 @@ impl Subgame {
     /// `root_cfg` sizes on the root's street, `later_cfg` on the streets after it (D-SRCH-3);
     /// stops expanding once `cap` nodes exist (`truncated`; for size measurements only).
     pub fn build_with(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize) -> Subgame {
+        Self::build_inner(rules, root_cfg, later_cfg, root, cap, 0)
+    }
+
+    /// Preflop subgame from the start of the hand in which the seats in `forced_fold` only fold
+    /// (or check when folding is not legal): the "folded players fixed" reading (D-SRCH-14).
+    pub fn build_preflop_fixed(rules: &Rules, cfg: &AbstractionConfig, forced_fold: u8, cap: usize) -> Subgame {
+        Self::build_inner(rules, cfg, cfg, rules.root(), cap, forced_fold)
+    }
+
+    fn build_inner(rules: &Rules, root_cfg: &AbstractionConfig, later_cfg: &AbstractionConfig, root: BState, cap: usize, forced_fold: u8) -> Subgame {
         if root.street == 0 {
             assert_eq!(root, rules.root(), "a preflop subgame starts at the start of the hand");
         } else {
             assert!(root.raises == 0 && root.street_bet.iter().all(|&b| b == 0), "the root must be the start of a round");
         }
         let rule = LeafRule::for_root(rules, &root);
-        let mut g = Subgame { rule, root_street: root.street, nodes: Vec::new(), children: Vec::new(), edges: Vec::new(), truncated: false, cap };
+        let mut g = Subgame { rule, root_street: root.street, nodes: Vec::new(), children: Vec::new(), edges: Vec::new(), truncated: false, cap, forced_fold };
         g.add(rules, [root_cfg, later_cfg], root, Kind::Decision);
         g
     }
@@ -113,9 +126,12 @@ impl Subgame {
             self.truncated = true;
             return id;
         }
+        let forced = self.forced_fold;
         let kids: Vec<(Option<Action>, u32)> = match kind {
             Kind::Decision => rules
                 .actions(&s, cfgs[(s.street != self.root_street) as usize])
+                .into_iter()
+                .filter(|&a| forced & (1 << s.to_act) == 0 || a == Action::Fold || (a == Action::Call && !rules.actions(&s, cfgs[0]).contains(&Action::Fold)))
                 .into_iter()
                 .map(|a| {
                     let child = match rules.apply(&s, a) {
@@ -271,6 +287,26 @@ mod tests {
         let after = g.child(bet, 2); // next player: [fold, call, 1 pot, all-in]
         assert!(matches!(g.action(bet, 2), Some(RaiseTo(_))));
         assert_eq!(g.nodes[after as usize].kind, Kind::Leaf);
+    }
+
+    #[test]
+    fn forced_folds_leave_one_action_for_folded_seats() {
+        let r = Rules { players: 4, ..Rules::default() };
+        let c = cfg(CFG);
+        let full = Subgame::build(&r, &c, r.root());
+        // seats 2 and 3 (first to act preflop) fixed to fold: exactly one action, Fold, wherever
+        // they act; the blinds keep their full tree
+        let g = Subgame::build_preflop_fixed(&r, &c, 0b1100, usize::MAX);
+        let mut blind_decisions = 0;
+        for (i, n) in g.nodes.iter().enumerate().filter(|(_, n)| n.kind == Kind::Decision) {
+            if n.state.to_act >= 2 {
+                assert_eq!((n.n, g.action(i as u32, 0)), (1, Some(Action::Fold)));
+            } else {
+                blind_decisions += 1;
+            }
+        }
+        assert!(blind_decisions > 0);
+        assert!(action_sequences(&g) < action_sequences(&full));
     }
 
     #[test]
