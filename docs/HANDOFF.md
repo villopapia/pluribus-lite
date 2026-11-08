@@ -7,7 +7,8 @@ deviation documented, justified and, where possible, measured.
 
 ## 1. Repo state
 
-- Repository: `C:\Users\User\pluribus-lite`, branch `main`; `git log -1` shows the latest
+- Repository: Dell `C:\Users\User\pluribus-lite` (training), MSI
+  `C:\Users\chris\Desktop\pluribus-lite` (development); branch `main`; `git log -1` shows the latest
   commit. Tags: `m0`, `m1-prelim`, `m1-prelim2`, `m2-design`.
 - Tests: 45 `cfr`, 74 `nlhe` unit, 5 `nlhe` config tests; 15 Python tests; all pass.
   `cd engine && cargo test --release` (cargo at `~/.cargo/bin`, not on PATH) and
@@ -91,10 +92,9 @@ close programs, delete STOP and start the task.
    D-ALG-9 ablations.
 6. **M4 search** per `fidelity_spec.md` §4.
 7. Housekeeping: delete legacy abstractions `m2_11g`, `k200` if not needed.
-8. **Pin the Dell's Python env (light job, OK while the run goes):** run
-   `analysis\.venv\Scripts\python -m pip freeze` on the Dell and compare it with
-   `analysis/requirements.lock` (made on the MSI 2026-11-08: Python 3.13.17, pokerkit 0.7.7,
-   latest pandas/pyarrow/matplotlib/numpy/pytest), then pin both machines to the same versions.
+8. ~~Pin the Dell's Python env~~ **Closed:** both machines pinned, verified 2026-11-08 (Dell
+   `pip freeze` identical to `analysis/requirements.lock`, 19 packages). The interpreters differ
+   in patch level only (Dell 3.13.1, MSI 3.13.17).
 
 Closed today: disk-safe I/O (task 1), OCHS river table + benchmark (task 2), Data S1
 cross-check (task 3), auto-resume task (task 4).
