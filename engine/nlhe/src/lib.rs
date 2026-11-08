@@ -14,3 +14,4 @@ pub mod eval_lut;
 pub mod index;
 pub mod kmeans;
 pub mod ochs;
+pub mod river_table;

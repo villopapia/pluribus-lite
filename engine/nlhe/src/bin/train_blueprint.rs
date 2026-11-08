@@ -5,7 +5,18 @@
 //!   --buckets 256 --run-dir ../data/runs/NAME --threads 12 --minutes 1440
 //!   [--plan-minutes 23040] [--warmup-minutes 10] [--strategy-interval 10000]
 //!   [--checkpoint-minutes 120] [--keep-checkpoints 3] [--log-seconds 60]
-//!   [--stop-file PATH] [--seed 1] [--bench-seconds S]`
+//!   [--stop-file PATH] [--seed 1] [--bench-seconds S]
+//!   [--river-method on_the_fly|precomputed_table] [--river-table-mode file|ram]
+//!   [--phi-start-paper-minute 0] [--prune-exempt-fold true] [--prune-exempt-runout false]`
+//!
+//! * Ablation flags (docs/deviations.md; defaults = rulings of 2026-11-08), applied to fresh
+//!   and resumed runs alike: `--phi-start-paper-minute` (D-ALG-5; 0 = phi from t = 0 with
+//!   discounting, 800 = the text's start), `--prune-exempt-fold` / `--prune-exempt-runout`
+//!   (D-ALG-9).
+//!
+//! * River buckets: `river_method` from the config unless `--river-method` overrides it;
+//!   `precomputed_table` reads `<abstraction-dir>/river.tbl` (`file`: positioned reads via the
+//!   OS page cache, default; `ram`: loaded into memory). Identical buckets either way (tested).
 //!
 //! * Resumes automatically from the newest `ckpt_*.bin` in the run dir (schedule, seed and
 //!   snapshot count come from the checkpoint).
@@ -15,14 +26,17 @@
 //!   (Pluribus' ~8-day run; docs/deviations.md D-SCHED-1): discount every 10 until 400,
 //!   prune after 200, preflop average sampling and post-flop snapshots (every 200) from 800.
 //! * Stops on the time budget or when the stop file exists, always writing a final checkpoint.
-//!   Keeps the newest `--keep-checkpoints` checkpoint files.
+//!   Retention is delete-before-write: at most `--keep-checkpoints` (>= 2) files exist at any
+//!   moment, *including* the one being written, so one complete checkpoint always exists.
+//!   If the newest checkpoint cannot be read, the next older one is used.
 //! * Checkpoints stream to disk in 1 MiB chunks (no table-sized copy in memory).
 //! * Metrics: `<run-dir>/metrics.tsv`; schedule: `<run-dir>/schedule.txt`.
 
 use nlhe::betting::Rules;
 use nlhe::blueprint::*;
 use nlhe::buckets::{CardAbstraction, TableAbstraction};
-use nlhe::config::AbstractionConfig;
+use nlhe::config::{AbstractionConfig, RiverMethod};
+use nlhe::river_table::RiverTableMode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -44,6 +58,11 @@ struct Args {
     stop_file: Option<PathBuf>,
     seed: u64,
     bench_seconds: Option<f64>,
+    river_method: Option<RiverMethod>,
+    river_table_mode: RiverTableMode,
+    phi_start_paper_minute: f64,
+    prune_exempt_fold: bool,
+    prune_exempt_runout: bool,
 }
 
 fn parse() -> Args {
@@ -63,6 +82,11 @@ fn parse() -> Args {
         stop_file: None,
         seed: 1,
         bench_seconds: None,
+        river_method: None,
+        river_table_mode: RiverTableMode::File,
+        phi_start_paper_minute: 0.0,
+        prune_exempt_fold: true,
+        prune_exempt_runout: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -84,11 +108,42 @@ fn parse() -> Args {
             "--stop-file" => a.stop_file = Some(x.into()),
             "--seed" => a.seed = x.parse().unwrap(),
             "--bench-seconds" => a.bench_seconds = Some(x.parse().unwrap()),
+            "--river-method" => {
+                a.river_method = Some(match x.as_str() {
+                    "on_the_fly" => RiverMethod::OnTheFly,
+                    "precomputed_table" => RiverMethod::PrecomputedTable,
+                    _ => panic!("--river-method on_the_fly|precomputed_table"),
+                })
+            }
+            "--river-table-mode" => a.river_table_mode = x.parse().unwrap(),
+            "--phi-start-paper-minute" => a.phi_start_paper_minute = x.parse().unwrap(),
+            "--prune-exempt-fold" => a.prune_exempt_fold = x.parse().unwrap(),
+            "--prune-exempt-runout" => a.prune_exempt_runout = x.parse().unwrap(),
             o => panic!("unknown argument {o}"),
         }
         i += 2;
     }
     a
+}
+
+/// Apply the ablation flags to a schedule. `planned` = planned iterations (None in the
+/// warm-up, when paper minutes are not yet defined: phi then runs only if it starts at 0).
+fn apply_flags(s: &mut Schedule, a: &Args, planned: Option<u64>) {
+    s.prune_exempt_fold = a.prune_exempt_fold;
+    s.prune_exempt_runout = a.prune_exempt_runout;
+    s.avg_start = if a.phi_start_paper_minute <= 0.0 {
+        0
+    } else {
+        match planned {
+            Some(p) => (p as f64 * a.phi_start_paper_minute / 11_520.0).round() as u64,
+            None => u64::MAX,
+        }
+    };
+}
+
+/// Planned iterations of a resumed schedule (discount_every = 10 paper minutes).
+fn planned_of(s: &Schedule) -> Option<u64> {
+    (s.lcfr_until > 0 && s.prune_after != u64::MAX).then(|| s.discount_every * 1_152)
 }
 
 fn checkpoints(dir: &Path) -> Vec<(u64, PathBuf)> {
@@ -121,9 +176,17 @@ fn main() {
     let cfg = AbstractionConfig::parse(&std::fs::read_to_string(&a.config).expect("config")).expect("parse config");
     std::fs::create_dir_all(&a.run_dir).expect("run dir");
     let t_setup = Instant::now();
-    let abs = TableAbstraction::load(&a.abs_dir, a.buckets).expect("load abstraction");
+    let mut abs = TableAbstraction::load(&a.abs_dir, a.buckets).expect("load abstraction");
+    let river_method = a.river_method.unwrap_or(cfg.river_method);
+    if river_method == RiverMethod::PrecomputedTable {
+        let t0 = Instant::now();
+        abs.load_river_table(&a.abs_dir, a.river_table_mode, false).expect("load river table");
+        println!("river: precomputed table ({:?} mode) loaded in {:.1}s", a.river_table_mode, t0.elapsed().as_secs_f64());
+    } else {
+        println!("river: on the fly (OCHS + nearest centroid)");
+    }
     let tree = Tree::build(&Rules::default(), &cfg, abs.buckets());
-    let st = Storage::new(&tree);
+    let mut st = Storage::new(&tree);
     println!(
         "setup {:.1}s: {} nodes ({} decision), {} regret slots if dense ({:.2} GiB), {} preflop slots allocated, {} avg counts ({:.2} GiB), buckets {:?}, threads {}",
         t_setup.elapsed().as_secs_f64(),
@@ -141,10 +204,23 @@ fn main() {
     let snapshot_path = a.run_dir.join("postflop_snapshots.bin");
 
     // resume or start fresh (warm-up first)
-    let resumed = checkpoints(&a.run_dir).pop();
-    let (mut t, mut elapsed, mut sched, seed, mut snapshots, mut in_warmup) = if let Some((_, p)) = resumed {
+    assert!(a.keep_checkpoints >= 2, "--keep-checkpoints must be >= 2 (one complete file while writing)");
+    let mut resumed = None;
+    for (_, p) in checkpoints(&a.run_dir).into_iter().rev() {
         let t0 = Instant::now();
-        let m = load_checkpoint(&p, &tree, &st).expect("load checkpoint");
+        match load_checkpoint(&p, &tree, &st) {
+            Ok(m) => {
+                resumed = Some((p, m, t0));
+                break;
+            }
+            Err(e) => {
+                println!("checkpoint {} unreadable ({e}); trying an older one", p.display());
+                st = Storage::new(&tree); // discard a partial load
+            }
+        }
+    }
+    let resumed_any = resumed.is_some();
+    let (mut t, mut elapsed, mut sched, seed, mut snapshots, mut in_warmup) = if let Some((p, m, t0)) = resumed {
         assert_eq!(m.config, cfg.name, "checkpoint is for another config");
         let warm = m.sched.lcfr_until == 0 && m.sched.prune_after == u64::MAX;
         println!(
@@ -160,6 +236,23 @@ fn main() {
     } else {
         (0, 0.0, Schedule::warmup(a.strategy_interval), a.seed, 0, true)
     };
+    {
+        let before = (sched.avg_start, sched.prune_exempt_fold, sched.prune_exempt_runout);
+        let planned = planned_of(&sched);
+        apply_flags(&mut sched, &a, planned);
+        println!(
+            "flags: phi start iteration {} (paper minute {}), prune exempt fold {}, run-out {}{}",
+            if sched.avg_start == u64::MAX { "after warm-up".to_string() } else { sched.avg_start.to_string() },
+            a.phi_start_paper_minute,
+            sched.prune_exempt_fold,
+            sched.prune_exempt_runout,
+            if before != (sched.avg_start, sched.prune_exempt_fold, sched.prune_exempt_runout) && resumed_any {
+                format!(" (changed on resume from {before:?}; phi accumulates from iteration {t})")
+            } else {
+                String::new()
+            }
+        );
+    }
 
     if let Some(bs) = a.bench_seconds {
         let tr = Trainer { tree: &tree, st: &st, abs: &abs, sched: &sched, seed };
@@ -186,6 +279,17 @@ fn main() {
     }
 
     let metrics_path = a.run_dir.join("metrics.tsv");
+    const HEADER: &str = "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tseq_reached\tseq_reached_frac\tphase	pruned_rate";
+    // a metrics file with an older column set is kept aside, not appended to
+    if let Ok(old) = std::fs::read_to_string(&metrics_path) {
+        if old.lines().next() != Some(HEADER) {
+            let mut k = 1;
+            while a.run_dir.join(format!("metrics_v{k}.tsv")).exists() {
+                k += 1;
+            }
+            std::fs::rename(&metrics_path, a.run_dir.join(format!("metrics_v{k}.tsv"))).expect("rotate metrics");
+        }
+    }
     let new_file = !metrics_path.exists();
     let mut lg = Logger {
         file: std::fs::OpenOptions::new().create(true).append(true).open(&metrics_path).unwrap(),
@@ -198,7 +302,7 @@ fn main() {
     lg.prev_pre = policy_snapshot(&tree, &st, &lg.pre_s);
     lg.prev_post = policy_snapshot(&tree, &st, &lg.post_s);
     if new_file {
-        writeln!(lg.file, "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tseq_reached\tseq_reached_frac\tphase").unwrap();
+        writeln!(lg.file, "{HEADER}").unwrap();
     }
 
     let wall0 = Instant::now();
@@ -213,17 +317,27 @@ fn main() {
     let save = |t: u64, elapsed: f64, sched: &Schedule, snapshots: u64| {
         let meta = CkptMeta { config: cfg.name.clone(), buckets: tree.buckets, iteration: t, seed, elapsed_secs: elapsed, sched: sched.clone(), snapshots };
         let p = a.run_dir.join(format!("ckpt_{t:012}.bin"));
-        let t0 = Instant::now();
-        let n = save_checkpoint(&p, &meta, &tree, &st).expect("save checkpoint");
-        println!("checkpoint {} ({:.2} GiB) written in {:.1}s", p.display(), n as f64 / 1073741824.0, t0.elapsed().as_secs_f64());
-        let all = checkpoints(&a.run_dir);
-        if all.len() > a.keep_checkpoints {
-            for (_, old) in &all[..all.len() - a.keep_checkpoints] {
+        // delete-before-write: leftovers of an interrupted write, then the oldest complete
+        // files, so that with the new one at most keep_checkpoints exist
+        if let Ok(rd) = std::fs::read_dir(&a.run_dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with("ckpt_") && name.ends_with(".tmp") && std::fs::remove_file(e.path()).is_ok() {
+                    println!("removed partial checkpoint {name}");
+                }
+            }
+        }
+        let all: Vec<_> = checkpoints(&a.run_dir).into_iter().filter(|(_, q)| *q != p).collect();
+        if all.len() >= a.keep_checkpoints {
+            for (_, old) in &all[..all.len() + 1 - a.keep_checkpoints] {
                 if std::fs::remove_file(old).is_ok() {
                     println!("removed old checkpoint {}", old.display());
                 }
             }
         }
+        let t0 = Instant::now();
+        let n = save_checkpoint(&p, &meta, &tree, &st).expect("save checkpoint");
+        println!("checkpoint {} ({:.2} GiB) written in {:.1}s", p.display(), n as f64 / 1073741824.0, t0.elapsed().as_secs_f64());
     };
 
     loop {
@@ -258,6 +372,7 @@ fn main() {
                 // planned run = warm-up iterations + the rest of the plan at the measured rate
                 let planned = t + (rate * (plan * 60.0 - w).max(0.0)) as u64;
                 sched = Schedule::pluribus_scaled(planned, a.strategy_interval);
+                apply_flags(&mut sched, &a, Some(planned));
                 in_warmup = false;
                 phase = "warmup_end";
                 let skipped = (1u64..).take_while(|k| k * sched.discount_every <= t).count();
@@ -285,8 +400,10 @@ fn main() {
             }
             if sched.snapshot_due(t) {
                 let s0 = Instant::now();
-                snapshots = snapshot_add(&snapshot_path, &tree, &st).expect("snapshot");
-                println!("post-flop snapshot {snapshots} at iteration {t} in {:.1}s", s0.elapsed().as_secs_f64());
+                let k = sched.snapshot_index(t);
+                let ss = snapshot_add(&snapshot_path, &tree, &st, k, a.threads).expect("snapshot");
+                snapshots = ss.total;
+                println!("post-flop snapshot {k} at iteration {t} in {:.1}s: {ss:?}", s0.elapsed().as_secs_f64());
             }
         }
 
@@ -338,6 +455,8 @@ fn main() {
                 st.allocated_action_sequences() as f64 / tree.actions.iter().sum::<u64>() as f64,
                 phase
             );
+            // share of traverser actions skipped by pruning, in pruning iterations
+            row += &format!("	{:.5}", interval.pruned_actions as f64 / interval.prune_considered.max(1) as f64);
             println!("{row}");
             writeln!(lg.file, "{row}").unwrap();
             lg.file.flush().unwrap();

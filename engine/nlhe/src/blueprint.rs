@@ -396,14 +396,24 @@ pub struct Schedule {
     /// Paper (supplement pp. 3, 14): pruning never skips actions on the final betting round
     /// or actions that immediately lead to a terminal node. Default true (paper-faithful).
     pub prune_skip_river_and_terminal: bool,
+    /// How "immediately leads to a terminal node" is read (docs/deviations.md D-ALG-9,
+    /// ruling 2026-11-08), only when `prune_skip_river_and_terminal`:
+    /// * `prune_exempt_fold` (default true): the traverser's own fold is never pruned (its
+    ///   payoff is fixed at once, in heads-up and multiway pots alike);
+    /// * `prune_exempt_runout` (default false): a call/all-in that ends the betting before the
+    ///   river (all-in run-out to showdown) is never pruned.
+    /// Both false + the old literal reading = fold only heads-up (FOLD_END) and run-outs.
+    pub prune_exempt_fold: bool,
+    pub prune_exempt_runout: bool,
     /// First discount boundary (k = 1). 0 means "discount_every" (boundaries at multiples).
     pub discount_base: u64,
     /// Post-flop snapshot averaging (paper p. 15: every 200 min after the first 800 min).
     /// `snapshot_every == 0` disables it.
     pub snapshot_after: u64,
     pub snapshot_every: u64,
-    /// Preflop average-strategy sampling starts here (paper p. 15: "after the initial 800
-    /// minutes"; Algorithm 1 itself starts at t = 0, see docs/deviations.md).
+    /// Preflop average-strategy (phi) sampling starts here. Default 0 (Algorithm 1; ruling
+    /// 2026-11-08, docs/deviations.md D-ALG-5: line 26 discounts phi during the first 400
+    /// minutes, so phi must accumulate then). Paper minute 800 (the text) is an ablation.
     pub avg_start: u64,
 }
 
@@ -421,14 +431,17 @@ impl Schedule {
             prune_c: cfr::intregret::PRUNE_THRESHOLD,
             floor: cfr::intregret::REGRET_FLOOR,
             prune_skip_river_and_terminal: true,
+            prune_exempt_fold: true,
+            prune_exempt_runout: false,
             discount_base: 0,
             snapshot_after: f(800.0),
             snapshot_every: f(200.0),
-            avg_start: f(800.0),
+            avg_start: 0,
         }
     }
 
-    /// Schedule used during the warm-up: no pruning, no discounting, no snapshots.
+    /// Schedule used during the warm-up: no pruning, no discounting, no snapshots; phi from
+    /// t = 0 (the warm-up is the start of training).
     pub fn warmup(strategy_interval: u64) -> Schedule {
         Schedule {
             strategy_interval,
@@ -439,10 +452,12 @@ impl Schedule {
             prune_c: cfr::intregret::PRUNE_THRESHOLD,
             floor: cfr::intregret::REGRET_FLOOR,
             prune_skip_river_and_terminal: true,
+            prune_exempt_fold: true,
+            prune_exempt_runout: false,
             discount_base: 0,
             snapshot_after: u64::MAX,
             snapshot_every: 0,
-            avg_start: u64::MAX,
+            avg_start: 0,
         }
     }
 
@@ -470,6 +485,11 @@ impl Schedule {
         self.snapshot_every > 0 && t >= self.snapshot_after && (t - self.snapshot_after) % self.snapshot_every == 0
     }
 
+    /// 1-based index of the snapshot due at `t` (when `snapshot_due(t)`).
+    pub fn snapshot_index(&self, t: u64) -> u64 {
+        (t - self.snapshot_after) / self.snapshot_every + 1
+    }
+
     pub fn next_snapshot(&self, t: u64) -> Option<u64> {
         if self.snapshot_every == 0 || self.snapshot_after == u64::MAX {
             return None;
@@ -487,6 +507,8 @@ pub struct ThreadStats {
     pub river_calls: u64,
     pub nodes: u64,
     pub pruned_actions: u64,
+    /// traverser actions checked against the pruning threshold (pruning iterations only)
+    pub prune_considered: u64,
     /// traversals, and traversals that reached at least one river decision node
     pub traversals: u64,
     pub river_reached: u64,
@@ -501,6 +523,7 @@ impl ThreadStats {
         self.river_calls += o.river_calls;
         self.nodes += o.nodes;
         self.pruned_actions += o.pruned_actions;
+        self.prune_considered += o.prune_considered;
         self.traversals += o.traversals;
         self.river_reached += o.river_reached;
         self.regret.saturated += o.regret.saturated;
@@ -515,6 +538,9 @@ pub struct Deal {
     pub bucket: [[u16; 4]; MAX_P],
     pub sd: [u16; MAX_P],
     river_ready: bool,
+    river_row_ready: bool,
+    river_row: Box<[u8; crate::river_table::ROW]>,
+    river_reader: crate::river_table::RiverReader,
     /// set when the current traversal visits a river decision node
     pub reached_river: bool,
     rb: RiverBatch,
@@ -544,6 +570,9 @@ impl Deal {
             bucket: [[0; 4]; MAX_P],
             sd: [0; MAX_P],
             river_ready: false,
+            river_row_ready: false,
+            river_row: Box::new([0; crate::river_table::ROW]),
+            river_reader: Default::default(),
             reached_river: false,
             rb: RiverBatch::new(),
             hr: HeroRiver::new(),
@@ -572,6 +601,7 @@ impl Deal {
             self.sd[p] = lut.class(bh.add(h.0).add(h.1));
         }
         self.river_ready = false;
+        self.river_row_ready = false;
     }
 
     #[inline]
@@ -586,6 +616,17 @@ impl Deal {
             2 => abs.turn(h, &[self.board[0], self.board[1], self.board[2], self.board[3]]),
             _ => {
                 let t0 = Instant::now();
+                if let Some(rt) = abs.river_table() {
+                    if !self.river_row_ready {
+                        rt.read_row(&self.board, &mut self.river_row, &mut self.river_reader).expect("river table read");
+                        self.river_row_ready = true;
+                    }
+                    let v = abs.river_from_fine(self.river_row[crate::river_table::hole_slot(h, &self.board)] as usize);
+                    st.river_ns += t0.elapsed().as_nanos() as u64;
+                    st.river_calls += 1;
+                    self.bucket[p][street] = v;
+                    return v as usize;
+                }
                 let kind = abs.river_feature();
                 if kind != RiverFeature::None && !self.river_ready {
                     self.hr.prepare(&mut self.rb, &self.board);
@@ -688,8 +729,13 @@ impl<'a> Trainer<'a> {
             let child = self.tree.child(node, a);
             if prune {
                 let r = self.st.slot(base + a as u64).load(Ordering::Relaxed);
+                let cn = &self.tree.nodes[child as usize];
                 let exempt = self.sched.prune_skip_river_and_terminal
-                    && (street == 3 || self.tree.nodes[child as usize].kind != DECISION);
+                    && (street == 3
+                        || (self.sched.prune_exempt_fold && cn.folded & (1 << i) != 0)
+                        || cn.kind == FOLD_END
+                        || (self.sched.prune_exempt_runout && cn.kind == SHOWDOWN));
+                ts.prune_considered += 1;
                 if r <= self.sched.prune_c && !exempt {
                     explored[a] = false;
                     ts.pruned_actions += 1;
@@ -815,7 +861,9 @@ pub fn save_checkpoint(path: &Path, meta: &CkptMeta, tree: &Tree, st: &Storage) 
         for x in [meta.elapsed_secs, s.explore_prob] {
             w.write_all(&x.to_le_bytes())?;
         }
-        for x in [s.prune_c, s.floor, s.prune_skip_river_and_terminal as i32] {
+        // prune flags packed as bits: 1 = paper exceptions, 2 = fold exempt, 4 = run-out exempt
+        let pf = s.prune_skip_river_and_terminal as i32 | (s.prune_exempt_fold as i32) << 1 | (s.prune_exempt_runout as i32) << 2;
+        for x in [s.prune_c, s.floor, pf] {
             w.write_all(&x.to_le_bytes())?;
         }
         for x in [s.discount_base, s.snapshot_after, s.snapshot_every, meta.snapshots, s.avg_start] {
@@ -972,7 +1020,10 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
             explore_prob: f[1],
             prune_c: i[0],
             floor: i[1],
-            prune_skip_river_and_terminal: i[2] != 0,
+            prune_skip_river_and_terminal: i[2] & 1 != 0,
+            prune_exempt_fold: i[2] & 2 != 0,
+            // checkpoints before the D-ALG-9 ruling stored 1 = the literal reading
+            prune_exempt_runout: i[2] & 4 != 0 || i[2] == 1,
             discount_base: v2[0],
             snapshot_after: if version >= 2 { v2[1] } else { u64::MAX },
             snapshot_every: v2[2],
@@ -984,7 +1035,13 @@ pub fn load_checkpoint(path: &Path, tree: &Tree, st: &Storage) -> io::Result<Ckp
 
 // ------------------------------------------------------------------ post-flop snapshots
 
-const SNAP_MAGIC: &[u8; 4] = b"PLS2";
+const SNAP_MAGIC: &[u8; 4] = b"PLS3";
+/// magic, tree node count, total snapshots, record count
+const SNAP_HDR: u64 = 4 + 8 + 8 + 8;
+/// record header: node, last snapshot index applied, snapshots included, checksum
+const REC_HDR: usize = 16;
+/// in-place update chunk
+const SNAP_CHUNK: usize = 64 << 20;
 
 /// Quantised regret-matching strategy (sum ~ 65535) at (node, bucket); uniform if unallocated.
 #[inline]
@@ -997,145 +1054,269 @@ fn quantised_current(st: &Storage, tree: &Tree, node: u32, bucket: usize, out: &
     }
 }
 
-struct SnapReader {
-    r: BufReader<File>,
-    remaining: u64,
+#[inline]
+fn snap_rec_len(tree: &Tree, node: u32) -> usize {
+    let nd = &tree.nodes[node as usize];
+    REC_HDR + 4 * nd.n as usize * tree.buckets[nd.street as usize] as usize
 }
 
-impl SnapReader {
-    /// Next record: (node, snapshots included, sums), or None at the end.
-    fn next(&mut self, tree: &Tree) -> io::Result<Option<(u32, u32, Vec<u32>)>> {
-        if self.remaining == 0 {
-            return Ok(None);
+#[inline]
+fn is_postflop_decision(tree: &Tree, node: u32) -> bool {
+    tree.nodes.get(node as usize).is_some_and(|nd| nd.kind == DECISION && nd.street > 0)
+}
+
+/// FNV-1a (32-bit) over the record without its checksum field.
+fn snap_rec_check(rec: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for &b in rec[..12].iter().chain(&rec[REC_HDR..]) {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+#[inline]
+fn rd_u32(b: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
+}
+
+/// Apply snapshot `k` to one record in place (node field untouched). Returns 0 = updated,
+/// 1 = already contained snapshot k (skipped), 2 = torn record reset to this snapshot only.
+fn snap_apply(tree: &Tree, st: &Storage, rec: &mut [u8], k: u32) -> u8 {
+    let node = rd_u32(rec, 0);
+    let (last, cnt, chk) = (rd_u32(rec, 4), rd_u32(rec, 8), rd_u32(rec, 12));
+    let torn = chk != snap_rec_check(rec);
+    if !torn && last >= k {
+        return 1;
+    }
+    let nd = &tree.nodes[node as usize];
+    let (n, nb) = (nd.n as usize, tree.buckets[nd.street as usize] as usize);
+    let mut q = [0u32; MAX_A];
+    for b in 0..nb {
+        quantised_current(st, tree, node, b, &mut q);
+        for a in 0..n {
+            let o = REC_HDR + 4 * (b * n + a);
+            let old = if torn { 0 } else { rd_u32(rec, o) };
+            rec[o..o + 4].copy_from_slice(&(old + q[a]).to_le_bytes());
         }
-        self.remaining -= 1;
-        let mut b4 = [0u8; 4];
-        self.r.read_exact(&mut b4)?;
-        let node = u32::from_le_bytes(b4);
-        self.r.read_exact(&mut b4)?;
-        let cnt = u32::from_le_bytes(b4);
-        let nd = &tree.nodes[node as usize];
-        let size = nd.n as usize * tree.buckets[nd.street as usize] as usize;
-        let mut v = vec![0u32; size];
-        for x in v.iter_mut() {
-            self.r.read_exact(&mut b4)?;
-            *x = u32::from_le_bytes(b4);
-        }
-        Ok(Some((node, cnt, v)))
+    }
+    rec[4..8].copy_from_slice(&k.to_le_bytes());
+    rec[8..12].copy_from_slice(&(if torn { 1 } else { cnt + 1 }).to_le_bytes());
+    let c = snap_rec_check(rec);
+    rec[12..16].copy_from_slice(&c.to_le_bytes());
+    if torn {
+        2
+    } else {
+        0
     }
 }
 
-fn snap_open(path: &Path, tree: &Tree) -> io::Result<Option<(SnapReader, u64)>> {
-    let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
-    match File::open(path) {
-        Ok(f) => {
-            let mut r = BufReader::with_capacity(1 << 22, f);
-            let mut b4 = [0u8; 4];
-            let mut b8 = [0u8; 8];
-            r.read_exact(&mut b4)?;
-            if &b4 != SNAP_MAGIC {
-                return Err(bad("bad snapshot magic"));
-            }
-            r.read_exact(&mut b8)?;
-            if u64::from_le_bytes(b8) != tree.nodes.len() as u64 {
-                return Err(bad("snapshot file does not match the tree"));
-            }
-            r.read_exact(&mut b8)?;
-            let total = u64::from_le_bytes(b8);
-            r.read_exact(&mut b8)?;
-            let records = u64::from_le_bytes(b8);
-            Ok(Some((SnapReader { r, remaining: records }, total)))
+fn read_full_at(f: &mut File, buf: &mut [u8], off: u64) -> io::Result<usize> {
+    use std::io::{Seek, SeekFrom};
+    f.seek(SeekFrom::Start(off))?;
+    let mut got = 0;
+    while got < buf.len() {
+        let n = f.read(&mut buf[got..])?;
+        if n == 0 {
+            break;
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        got += n;
     }
+    Ok(got)
 }
 
-/// Add one snapshot of the post-flop current strategy (paper p. 15) to the sparse
-/// running-sum file at `path`. Records exist for post-flop nodes that are allocated now or
-/// were recorded before; each record stores how many snapshots it includes, so nodes first
-/// allocated later are averaged with uniform for the snapshots they missed. Streams the old
-/// file into a new one and renames (crash-safe, no table-sized buffer).
-/// Returns the total number of snapshots.
-pub fn snapshot_add(path: &Path, tree: &Tree, st: &Storage) -> io::Result<u64> {
-    let mut old = snap_open(path, tree)?;
-    let total = old.as_ref().map_or(0, |o| o.1) + 1;
-    let tmp = path.with_extension("tmp");
-    let mut records: Vec<u32> = Vec::new(); // node ids written (counted at the end)
+fn snap_header(f: &mut File, tree: &Tree) -> io::Result<(u64, u64)> {
+    let mut h = [0u8; SNAP_HDR as usize];
+    if read_full_at(f, &mut h, 0)? != h.len() || &h[0..4] != SNAP_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a PLS3 snapshot file"));
+    }
+    let u = |i: usize| u64::from_le_bytes(h[i..i + 8].try_into().unwrap());
+    if u(4) != tree.nodes.len() as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "snapshot file does not match the tree"));
+    }
+    Ok((u(12), u(20)))
+}
+
+fn snap_write_header(f: &mut File, tree: &Tree, total: u64, records: u64) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut h = Vec::with_capacity(SNAP_HDR as usize);
+    h.extend_from_slice(SNAP_MAGIC);
+    for x in [tree.nodes.len() as u64, total, records] {
+        h.extend_from_slice(&x.to_le_bytes());
+    }
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&h)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SnapStats {
+    /// snapshots in the file after this call
+    pub total: u64,
+    pub updated: u64,
+    pub appended: u64,
+    /// records that already contained this snapshot (a retry after a crash)
+    pub skipped: u64,
+    /// records whose checksum failed (torn write); reset to this snapshot only
+    pub torn: u64,
+    /// records past the header's count (an interrupted append), truncated
+    pub truncated_bytes: u64,
+}
+
+/// Add snapshot number `k` (1-based, from the schedule) of the post-flop current strategy
+/// (paper p. 15) to the running-sum file at `path`, **in place**:
+///
+/// 1. Existing records are read in 64 MiB chunks, updated and written back at the same
+///    offsets (no second copy of the file; peak disk = one file).
+/// 2. Post-flop nodes allocated since the last snapshot are appended (1 snapshot each; the
+///    snapshots they missed count as uniform, as before).
+/// 3. The header (total, record count) is written last.
+///
+/// **Crash safety:** each record stores the last snapshot index applied to it and a checksum,
+/// so a retry of snapshot `k` after a crash skips records that already have it; a torn record
+/// (checksum mismatch) is reset to "this snapshot only"; an interrupted append is truncated
+/// (the header count is written after the appends). Node ids and record lengths are never
+/// rewritten with different values, so the record layout survives any interruption.
+pub fn snapshot_add(path: &Path, tree: &Tree, st: &Storage, k: u64, threads: usize) -> io::Result<SnapStats> {
+    let k32 = u32::try_from(k).expect("snapshot index fits u32");
+    assert!(k32 >= 1);
+    let mut f = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    let len = f.metadata()?.len();
+    let (total0, records) = if len == 0 {
+        snap_write_header(&mut f, tree, 0, 0)?;
+        (0, 0)
+    } else {
+        snap_header(&mut f, tree)?
+    };
+    let mut s = SnapStats::default();
+    let mut have = vec![0u64; tree.nodes.len().div_ceil(64)];
+    let mut buf = vec![0u8; SNAP_CHUNK];
+    let (mut off, mut seen) = (SNAP_HDR, 0u64);
+    let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
+    while seen < records {
+        let got = read_full_at(&mut f, &mut buf, off)?;
+        // record boundaries inside this chunk
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        let mut pos = 0usize;
+        while seen + (spans.len() as u64) < records && pos + REC_HDR <= got {
+            let node = rd_u32(&buf, pos);
+            if !is_postflop_decision(tree, node) {
+                return Err(bad(format!("snapshot record at byte {} has invalid node {node}", off + pos as u64)));
+            }
+            let rl = snap_rec_len(tree, node);
+            if pos + rl > got {
+                break;
+            }
+            have[node as usize / 64] |= 1 << (node % 64);
+            spans.push((pos, rl));
+            pos += rl;
+        }
+        if spans.is_empty() {
+            return Err(bad(format!("snapshot file ends inside record {seen} (byte {off})")));
+        }
+        // update the records in parallel (disjoint slices), then write the chunk back
+        let mut slices: Vec<&mut [u8]> = Vec::with_capacity(spans.len());
+        let mut rest = &mut buf[..pos];
+        for &(_, rl) in &spans {
+            let (a, b) = rest.split_at_mut(rl);
+            slices.push(a);
+            rest = b;
+        }
+        let per = slices.len().div_ceil(threads.max(1));
+        let res: Vec<[u64; 3]> = std::thread::scope(|sc| {
+            let hs: Vec<_> = slices
+                .chunks_mut(per)
+                .map(|grp| {
+                    sc.spawn(move || {
+                        let mut c = [0u64; 3];
+                        for rec in grp.iter_mut() {
+                            c[snap_apply(tree, st, rec, k32) as usize] += 1;
+                        }
+                        c
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for c in res {
+            s.updated += c[0];
+            s.skipped += c[1];
+            s.torn += c[2];
+        }
+        use std::io::{Seek, SeekFrom};
+        f.seek(SeekFrom::Start(off))?;
+        f.write_all(&buf[..pos])?;
+        seen += spans.len() as u64;
+        off += pos as u64;
+    }
+    drop(buf);
+    if len > off {
+        s.truncated_bytes = len - off;
+    }
+    f.set_len(off)?;
+    // append records for newly allocated post-flop nodes, in node order
     {
-        let mut w = BufWriter::with_capacity(1 << 22, File::create(&tmp)?);
-        w.write_all(SNAP_MAGIC)?;
-        w.write_all(&(tree.nodes.len() as u64).to_le_bytes())?;
-        w.write_all(&total.to_le_bytes())?;
-        w.write_all(&0u64.to_le_bytes())?; // record count, patched below
-        let mut pending = match old.as_mut() {
-            Some((rd, _)) => rd.next(tree)?,
-            None => None,
-        };
-        let mut q = [0u32; MAX_A];
-        for (id, nd) in tree.nodes.iter().enumerate() {
-            if nd.kind != DECISION || nd.street == 0 {
+        use std::io::{Seek, SeekFrom};
+        f.seek(SeekFrom::Start(off))?;
+        let mut w = BufWriter::with_capacity(1 << 22, &mut f);
+        let mut rec = Vec::new();
+        for id in 0..tree.nodes.len() as u32 {
+            if have[id as usize / 64] >> (id % 64) & 1 == 1 || !is_postflop_decision(tree, id) || st.base(id).is_none() {
                 continue;
             }
-            let id = id as u32;
-            let prev = if pending.as_ref().is_some_and(|p| p.0 == id) {
-                let p = pending.take();
-                pending = match old.as_mut() {
-                    Some((rd, _)) => rd.next(tree)?,
-                    None => None,
-                };
-                p
-            } else {
-                None
-            };
-            if prev.is_none() && st.base(id).is_none() {
-                continue;
-            }
-            let n = nd.n as usize;
-            let nb = tree.buckets[nd.street as usize] as usize;
-            let (cnt, mut sums) = match prev {
-                Some((_, c, v)) => (c, v),
-                None => (0, vec![0u32; n * nb]),
-            };
-            for b in 0..nb {
-                quantised_current(st, tree, id, b, &mut q);
-                for a in 0..n {
-                    sums[b * n + a] += q[a];
-                }
-            }
-            w.write_all(&id.to_le_bytes())?;
-            w.write_all(&(cnt + 1).to_le_bytes())?;
-            for x in &sums {
-                w.write_all(&x.to_le_bytes())?;
-            }
-            records.push(id);
+            rec.clear();
+            rec.resize(snap_rec_len(tree, id), 0);
+            rec[0..4].copy_from_slice(&id.to_le_bytes());
+            // last = 0, cnt = 0, valid checksum -> snap_apply adds snapshot k
+            let c = snap_rec_check(&rec);
+            rec[12..16].copy_from_slice(&c.to_le_bytes());
+            snap_apply(tree, st, &mut rec, k32);
+            w.write_all(&rec)?;
+            s.appended += 1;
         }
         w.flush()?;
-        let mut f = w.into_inner().map_err(|e| e.into_error())?;
-        use std::io::{Seek, SeekFrom};
-        f.seek(SeekFrom::Start(4 + 8 + 8))?;
-        f.write_all(&(records.len() as u64).to_le_bytes())?;
-        f.sync_all()?;
     }
-    drop(old);
-    fs::rename(&tmp, path)?;
-    Ok(total)
+    f.sync_all()?;
+    s.total = total0.max(k);
+    snap_write_header(&mut f, tree, s.total, records + s.appended)?;
+    f.sync_all()?;
+    Ok(s)
 }
 
 /// Post-flop snapshot average loaded for evaluation.
 pub struct SnapshotAverage {
     pub total: u64,
     pub recs: cfr::fxhash::FxHashMap<u32, (u32, Vec<u32>)>,
+    /// records skipped because their checksum failed (they count as uniform)
+    pub torn: u64,
 }
 
 impl SnapshotAverage {
     pub fn load(path: &Path, tree: &Tree) -> io::Result<Self> {
-        let (mut rd, total) = snap_open(path, tree)?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no snapshot file"))?;
+        let mut f = File::open(path)?;
+        let (total, records) = snap_header(&mut f, tree)?;
+        let mut r = BufReader::with_capacity(1 << 22, f);
+        use std::io::{Seek, SeekFrom};
+        r.seek(SeekFrom::Start(SNAP_HDR))?;
         let mut recs = cfr::fxhash::FxHashMap::default();
-        while let Some((id, c, v)) = rd.next(tree)? {
-            recs.insert(id, (c, v));
+        let mut torn = 0;
+        let mut hdr = [0u8; REC_HDR];
+        for _ in 0..records {
+            r.read_exact(&mut hdr)?;
+            let node = rd_u32(&hdr, 0);
+            if !is_postflop_decision(tree, node) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("invalid node {node}")));
+            }
+            let mut rec = vec![0u8; snap_rec_len(tree, node)];
+            rec[..REC_HDR].copy_from_slice(&hdr);
+            r.read_exact(&mut rec[REC_HDR..])?;
+            if snap_rec_check(&rec) != rd_u32(&rec, 12) {
+                torn += 1;
+                continue;
+            }
+            let sums = rec[REC_HDR..].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            recs.insert(node, (rd_u32(&rec, 8), sums));
         }
-        Ok(SnapshotAverage { total, recs })
+        Ok(SnapshotAverage { total, recs, torn })
     }
 
     /// Averaged post-flop strategy at (node, bucket): missing snapshots count as uniform.
@@ -1330,6 +1511,8 @@ mod tests {
             prune_c: -2_000,
             floor: -3_000,
             prune_skip_river_and_terminal: true,
+            prune_exempt_fold: true,
+            prune_exempt_runout: false,
             discount_base: 0,
             snapshot_after: u64::MAX,
             snapshot_every: 0,
@@ -1474,7 +1657,7 @@ mod tests {
         assert_eq!(s.discount_every, 10_000);
         assert_eq!(s.prune_after, 200_000);
         assert_eq!(s.lcfr_until, 400_000);
-        assert_eq!(s.avg_start, 800_000);
+        assert_eq!(s.avg_start, 0, "phi from t = 0 (D-ALG-5 ruling)");
         assert_eq!(s.snapshot_after, 800_000);
         assert_eq!(s.snapshot_every, 200_000);
         assert_eq!(s.discount_k(10_000), Some(1));
@@ -1484,7 +1667,7 @@ mod tests {
         assert_eq!(s.next_discount(390_000), None);
         assert!(s.snapshot_due(800_000) && s.snapshot_due(1_000_000) && !s.snapshot_due(900_000));
         assert_eq!(s.next_snapshot(800_000), Some(1_000_000));
-        assert!(s.prune_skip_river_and_terminal);
+        assert!(s.prune_skip_river_and_terminal && s.prune_exempt_fold && !s.prune_exempt_runout);
         assert!(Schedule::warmup(10_000).discount_k(5).is_none());
     }
 
@@ -1494,7 +1677,7 @@ mod tests {
         let abs = StrengthAbstraction { k: 4 };
         let tree = Tree::build(&rules, &cfg, abs.buckets());
         // regrets below C only where `select(node, action)` is true
-        let run = |skip: bool, select: &dyn Fn(usize, usize) -> bool| {
+        let run = |skip: bool, fold: bool, runout: bool, select: &dyn Fn(usize, usize) -> bool| {
             let st = Storage::new(&tree);
             for (id, nd) in tree.nodes.iter().enumerate() {
                 if nd.kind != DECISION {
@@ -1516,20 +1699,33 @@ mod tests {
                 prune_c: -1_000_000_000,
                 floor: -2_000_000_000,
                 prune_skip_river_and_terminal: skip,
+                prune_exempt_fold: fold,
+                prune_exempt_runout: runout,
                 ..sched()
             };
             let (_, ts) = Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 3 }.run(0, 300, 1, &AtomicBool::new(false));
             ts
         };
+        let child = |id: usize, a: usize| &tree.nodes[tree.child(id as u32, a) as usize];
         let river = |id: usize, _a: usize| tree.nodes[id].street == 3;
-        let to_terminal = |id: usize, a: usize| tree.nodes[tree.child(id as u32, a) as usize].kind != DECISION;
-        let (r_on, r_off) = (run(true, &river), run(false, &river));
+        let fold = |id: usize, a: usize| child(id, a).folded & (1 << tree.nodes[id].player) != 0;
+        let multiway_fold = |id: usize, a: usize| fold(id, a) && child(id, a).kind == DECISION;
+        let runout = |id: usize, a: usize| tree.nodes[id].street < 3 && child(id, a).kind == SHOWDOWN;
+
+        let (r_on, r_off) = (run(true, true, false, &river), run(false, true, false, &river));
         assert_eq!(r_on.pruned_actions, 0, "river actions must never be pruned");
         assert!(r_off.pruned_actions > 0);
         assert!(r_on.river_reached > 0);
-        let (t_on, t_off) = (run(true, &to_terminal), run(false, &to_terminal));
-        assert_eq!(t_on.pruned_actions, 0, "terminal-leading actions must never be pruned");
-        assert!(t_off.pruned_actions > 0);
+        // D-ALG-9 ruling: the traverser's own fold is exempt, multiway pots included ...
+        assert_eq!(run(true, true, false, &fold).pruned_actions, 0, "folds must never be pruned");
+        assert!(run(false, true, false, &fold).pruned_actions > 0);
+        // ... while the literal reading (no fold flag) prunes multiway folds
+        assert!(run(true, false, false, &multiway_fold).pruned_actions > 0);
+        // all-in run-outs: prunable by default, exempt behind the flag
+        let ro = run(true, true, false, &runout);
+        assert!(ro.pruned_actions > 0, "run-outs are not exempt by default");
+        assert!(ro.prune_considered >= ro.pruned_actions);
+        assert_eq!(run(true, true, true, &runout).pruned_actions, 0);
     }
 
     #[test]
@@ -1558,9 +1754,11 @@ mod tests {
                 first.insert(id as u32, v);
             }
         }
-        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 1);
+        assert_eq!(snapshot_add(&path, &tree, &st, 1, 3).unwrap().total, 1);
         tr.run(300, 900, 1, &AtomicBool::new(false));
-        assert_eq!(snapshot_add(&path, &tree, &st).unwrap(), 2);
+        let s2 = snapshot_add(&path, &tree, &st, 2, 3).unwrap();
+        assert_eq!((s2.total, s2.updated, s2.skipped, s2.torn), (2, first.len() as u64, 0, 0));
+        assert!(!dir.join("snap.tmp").exists(), "updated in place, no second file");
         let avg = SnapshotAverage::load(&path, &tree).unwrap();
         assert_eq!(avg.total, 2);
         let mut grew = 0;
@@ -1586,6 +1784,82 @@ mod tests {
             let n = tree.nodes[*id as usize].n as usize;
             assert!((out[..n].iter().sum::<f64>() - 1.0).abs() < 1e-9);
         }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Crash safety of the in-place snapshot file: a retried snapshot is not applied twice,
+    /// a torn record is reset (counts as uniform for earlier snapshots), an interrupted
+    /// append is truncated, and the file never needs a second copy.
+    #[test]
+    fn snapshot_file_survives_retry_torn_record_and_interrupted_append() {
+        let (rules, cfg) = small();
+        let abs = StrengthAbstraction { k: 4 };
+        let tree = Tree::build(&rules, &cfg, abs.buckets());
+        let st = Storage::new(&tree);
+        let sc = sched();
+        let tr = Trainer { tree: &tree, st: &st, abs: &abs, sched: &sc, seed: 9 };
+        tr.run(0, 400, 1, &AtomicBool::new(false));
+        let dir = std::env::temp_dir().join(format!("bp_snapcrash_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snap.bin");
+        let s1 = snapshot_add(&path, &tree, &st, 1, 2).unwrap();
+        assert!(s1.appended > 0);
+        let len1 = fs::metadata(&path).unwrap().len();
+        let a1 = SnapshotAverage::load(&path, &tree).unwrap();
+
+        // retry of snapshot 1 (e.g. crash after the records, before the checkpoint): no-op
+        let r = snapshot_add(&path, &tree, &st, 1, 2).unwrap();
+        assert_eq!((r.total, r.updated, r.skipped, r.appended, r.torn), (1, 0, s1.appended, 0, 0));
+        assert_eq!(SnapshotAverage::load(&path, &tree).unwrap().recs, a1.recs);
+        assert_eq!(fs::metadata(&path).unwrap().len(), len1);
+
+        // interrupted append: garbage past the header's record count is truncated
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&[7u8; 100]).unwrap();
+        }
+        // torn record: corrupt one sum of the first record
+        let first_node;
+        {
+            let mut b = fs::read(&path).unwrap();
+            first_node = u32::from_le_bytes(b[SNAP_HDR as usize..SNAP_HDR as usize + 4].try_into().unwrap());
+            let o = SNAP_HDR as usize + REC_HDR;
+            b[o] ^= 0x55;
+            fs::write(&path, &b).unwrap();
+        }
+        let a_torn = SnapshotAverage::load(&path, &tree).unwrap();
+        assert_eq!(a_torn.torn, 1);
+        assert!(!a_torn.recs.contains_key(&first_node));
+
+        tr.run(400, 900, 1, &AtomicBool::new(false));
+        let s2 = snapshot_add(&path, &tree, &st, 2, 2).unwrap();
+        assert_eq!(s2.truncated_bytes, 100);
+        assert_eq!(s2.torn, 1);
+        assert_eq!(s2.updated + s2.torn, s1.appended);
+        let a2 = SnapshotAverage::load(&path, &tree).unwrap();
+        assert_eq!((a2.total, a2.torn), (2, 0));
+        assert_eq!(a2.recs[&first_node].0, 1, "torn record restarted with this snapshot only");
+        // every untouched record now holds both snapshots
+        let mut q = [0u32; MAX_A];
+        for (id, (cnt, sums)) in &a2.recs {
+            if *id == first_node {
+                continue;
+            }
+            let n = tree.nodes[*id as usize].n as usize;
+            let before = a1.recs.get(id);
+            assert_eq!(*cnt, if before.is_some() { 2 } else { 1 });
+            for b in 0..4 {
+                quantised_current(&st, &tree, *id, b, &mut q);
+                for a in 0..n {
+                    assert_eq!(sums[b * n + a], q[a] + before.map_or(0, |v| v.1[b * n + a]));
+                }
+            }
+        }
+        // in place: the file grew only by appended records
+        let grown: u64 = a2.recs.keys().filter(|id| !a1.recs.contains_key(id)).map(|&id| snap_rec_len(&tree, id) as u64).sum();
+        assert_eq!(fs::metadata(&path).unwrap().len(), len1 + grown);
+        let entries: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1, "no temporary copy");
         fs::remove_dir_all(dir).ok();
     }
 

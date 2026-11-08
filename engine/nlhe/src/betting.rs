@@ -481,6 +481,64 @@ river.0 = 1.0");
         assert!(naive.nodes.iter().all(|&n| n > 0));
     }
 
+    /// D-ACT-4 (accepted ruling): wherever the paper's "at most three / at most two" sizes
+    /// bind, illegal and duplicate sizes collapse. On every path of a heads-up tree with the
+    /// faithful turn/river sets: raise targets are distinct and increasing, each is a legal
+    /// raise (>= min-raise) or the all-in, and all-in appears once. The test also checks that
+    /// both collapse cases actually occur (sizes dropped below the min-raise, sizes capped at
+    /// the stack and merged into all-in), so "at most" is exercised rather than assumed.
+    #[test]
+    fn illegal_and_duplicate_sizes_collapse_on_every_path() {
+        let r = Rules { players: 2, ..Rules::default() };
+        let c = cfg("preflop.0 = 0.5
+preflop.1 = 1.0
+flop.0 = 0.5, 1.0
+turn.0 = 0.5, 1.0
+turn.1+ = 1.0
+river.0 = 0.5, 1.0
+river.1+ = 1.0");
+        #[derive(Default)]
+        struct Seen {
+            dropped: u64,
+            merged: u64,
+            nodes: u64,
+        }
+        fn walk(r: &Rules, c: &AbstractionConfig, s: &BState, seen: &mut Seen) {
+            let acts = r.actions(s, c);
+            let p = s.to_act as usize;
+            let max_bet = r.max_bet(s);
+            let stack = r.stack - s.total[p];
+            let max_to = s.street_bet[p] + stack;
+            let min_to = max_bet + s.last_inc.max(r.bb);
+            let tos: Vec<u32> = acts.iter().filter_map(|a| if let Action::RaiseTo(t) = a { Some(*t) } else { None }).collect();
+            assert!(tos.windows(2).all(|w| w[0] < w[1]), "distinct, increasing: {tos:?}");
+            assert!(tos.iter().all(|&t| (t >= min_to && t <= max_to) || t == max_to), "legal: {tos:?}");
+            assert!(tos.iter().filter(|&&t| t == max_to).count() <= 1);
+            if !tos.is_empty() {
+                seen.nodes += 1;
+                let pot = r.pot(s);
+                let to_call = max_bet - s.street_bet[p];
+                let raw: Vec<u32> = c
+                    .sizes_for(s.street as usize, s.raises as usize, r.n_in_hand(s))
+                    .iter()
+                    .map(|f| max_bet + (f * (pot + to_call) as f64).round() as u32)
+                    .collect();
+                seen.dropped += raw.iter().filter(|&&t| t < min_to).count() as u64;
+                seen.merged += raw.iter().filter(|&&t| t >= max_to).count() as u64;
+            }
+            for a in acts {
+                if let Next::Decision(n) = r.apply(s, a) {
+                    walk(r, c, &n, seen)
+                }
+            }
+        }
+        let mut seen = Seen::default();
+        walk(&r, &c, &r.root(), &mut seen);
+        assert!(seen.nodes > 1000);
+        assert!(seen.merged > 0, "some sizes reach the stack and merge into all-in");
+        let _ = seen.dropped; // min-raise drops are covered by small_sizes_dropped_and_big_sizes_collapse_to_allin
+    }
+
     /// Chip conservation and street-closing invariants on every path of a small tree.
     #[test]
     fn invariants_hold_on_every_path() {

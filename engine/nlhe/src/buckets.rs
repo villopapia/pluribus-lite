@@ -11,6 +11,7 @@ use crate::kmeans::{KMeans, Metric};
 use crate::ochs::N_CLUSTERS;
 use crate::eval_lut::{LHand, Lut, N_CLASSES};
 use crate::index::hand_index;
+use crate::river_table::{RiverTable, RiverTableMode};
 use std::io;
 use std::path::Path;
 
@@ -50,6 +51,14 @@ pub trait CardAbstraction: Sync + Send {
     /// River bucket from the feature named by `river_feature()`.
     fn river(&self, hole: (u8, u8), board: &[u8; 5], feature: &[f32]) -> u16;
     fn river_feature(&self) -> RiverFeature;
+    /// Precomputed river table (fine buckets), if loaded; the trainer then skips the feature.
+    fn river_table(&self) -> Option<&RiverTable> {
+        None
+    }
+    /// Map a fine river bucket from the table to the trained bucket count.
+    fn river_from_fine(&self, fine: usize) -> u16 {
+        fine as u16
+    }
 }
 
 enum RiverModel {
@@ -61,6 +70,7 @@ pub struct TableAbstraction {
     flop: Vec<u8>,
     turn: Vec<u8>,
     river: RiverModel,
+    river_table: Option<RiverTable>,
     fine: [u32; 4],
     target: [u32; 4],
 }
@@ -95,7 +105,28 @@ impl TableAbstraction {
         if target == 0 || fine[1..].iter().any(|&k| target > k) {
             return Err(bad(format!("target {target} must be in 1..=built buckets {fine:?}")));
         }
-        Ok(TableAbstraction { flop, turn, river, fine, target: [169, target, target, target] })
+        Ok(TableAbstraction { flop, turn, river, river_table: None, fine, target: [169, target, target, target] })
+    }
+
+    /// Load `<dir>/river.tbl` (built by `build_abstraction --stages river_table` from this
+    /// directory's `river.ochs`); afterwards river buckets come from the table.
+    pub fn load_river_table(&mut self, dir: &Path, mode: RiverTableMode, verify: bool) -> io::Result<()> {
+        let km = match &self.river {
+            RiverModel::Ochs(km) => km,
+            RiverModel::Cutoffs(_) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "river table needs an OCHS river model"))
+            }
+        };
+        self.river_table = Some(RiverTable::open(&dir.join("river.tbl"), km, mode, verify)?);
+        Ok(())
+    }
+
+    /// The fine OCHS model (for building the table).
+    pub fn river_kmeans(&self) -> Option<&KMeans> {
+        match &self.river {
+            RiverModel::Ochs(km) => Some(km),
+            RiverModel::Cutoffs(_) => None,
+        }
     }
 
     #[inline]
@@ -122,6 +153,13 @@ impl CardAbstraction for TableAbstraction {
             RiverModel::Ochs(km) => km.nearest(feature).0,
             RiverModel::Cutoffs(c) => river_bucket(c, feature[0]),
         };
+        self.coarse(3, fine)
+    }
+    fn river_table(&self) -> Option<&RiverTable> {
+        self.river_table.as_ref()
+    }
+    #[inline]
+    fn river_from_fine(&self, fine: usize) -> u16 {
         self.coarse(3, fine)
     }
     fn river_feature(&self) -> RiverFeature {
