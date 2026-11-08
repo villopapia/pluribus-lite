@@ -32,21 +32,26 @@ deviation documented, justified and, where possible, measured.
 
 | what | PID | details |
 |---|---|---|
-| **Dell long run, pilot only** (`train_blueprint`, `pilot_dell_fit11.cfg`, `j63` with 25 restarts) | **6984** (cmd 13840), started by the scheduled task, so detached from any Claude session | started **fresh** 2026-11-08 17:04:51, BelowNormal, 12 threads, **planned 83,518,000,000 iterations** (explicit, D-SCHED-2; ≈ 16 days at 60,415 it/s), river on the fly, checkpoint every 120 min, keep 2 |
+| **Dell long run, pilot only** (`train_blueprint`, `pilot_dell_fit11.cfg`, `j63` with 25 restarts) | **33564** (cmd 9480), started by the scheduled task, so detached from any Claude session | started **fresh** 2026-11-08 17:04:51 (pid 6984); watchdog stop 19:05 at iteration 404,311,320; **resumed 20:38:06** from `ckpt_000404311320.bin`; BelowNormal, 12 threads, **planned 83,518,000,000 iterations** (explicit, D-SCHED-2; ≈ 16 days at 60,415 it/s), river on the fly, checkpoint every 120 min, keep 2 |
 
 Run dir `C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\`:
 - `launcher.log`: every start/exit with the **exit code** (the place to look first)
 - `train.log` / `train.err`: stdout / stderr of the trainer
 - `metrics.tsv`: one row every 5 min (`it_per_s`, `alloc_gib`, `pruned_rate`, ...)
 - `progress.tsv`: every 6 h, measured vs planned speed and **projected finish (UTC)**
-- `watchdog.tsv`: memory every hour (sampled every 5 min); **STOP is created automatically
-  if available RAM < 1 GB**
+- `watchdog.tsv`: memory every hour, plus every pause/resume event. **Pause/resume (since
+  2026-11-08 20:38):** if available RAM < 1 GB, the watchdog creates `STOP` **and the marker
+  `STOP.watchdog`** (graceful stop). The launcher stays alive and, once available RAM > 3 GB for
+  10 consecutive minutes, deletes both and restarts the trainer from the newest checkpoint.
+  **A `STOP` without the marker (yours) is never resumed automatically.** To cancel a pending
+  automatic resume, delete `STOP.watchdog`.
 - `schedule.txt`, `ckpt_*.bin`, `postflop_snapshots.bin` (from paper-minute 800 ≈ 26.7 h)
 
 **Launcher:** `scripts\windows\run_pilot.ps1` (BelowNormal, private binary copy in
 `<run>\bin`, refuses to start if already running or if `STOP` exists).
 **Scheduled task:** `pluribus-lite resume pilot` runs the launcher **at logon** of the user
-(a boot trigger needs admin rights and was refused). It never deletes STOP.
+(a boot trigger needs admin rights and was refused). At logon it continues a watchdog pause
+(STOP + marker) but never starts over a manual STOP.
 
 **Stop gracefully:** `New-Item C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\STOP`
 (final checkpoint within seconds). **Resume:** delete `STOP`, then
@@ -54,9 +59,12 @@ Run dir `C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\`:
 build: stop, delete `<run>\bin\train_blueprint.exe` (the launcher copies the current build),
 start the task.
 
-**Memory:** the pilot heads for ≈ 10.9 GiB; ~5.7 GB was available at launch (top users:
-VS Code 4.8 GB, claude 1.5 GB, Chrome 1.4 GB, WebView2 0.8 GB). If the watchdog creates STOP,
-close programs, delete STOP and start the task.
+**Memory:** the regret allocation curve (to 0.48% of the plan) projects **≈ 4.4–6.1 GiB of
+regrets at the end** (log-linear vs power-law fit; 2.25 GiB at iteration 404M), i.e. a
+trainer private footprint of **≈ 7–9 GiB**, below the old 10.9 GiB estimate. That estimate assumed
+Pluribus' encountered share 0.622; the extrapolated share is 0.33–0.47. The Dell has only
+~4 GB available with VS Code (4.7 GB), Chrome (1.4 GB) and claude (1.5 GB) open, so expect
+watchdog pauses unless these are closed.
 
 ## 3. Decisions made on 2026-11-08 (all recorded in deviations.md / fidelity docs)
 
