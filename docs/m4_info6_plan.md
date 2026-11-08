@@ -43,47 +43,44 @@ Output per flop: river bucket (u16) per (turn+river, hand) and turn bucket per (
 1,755 × 2.65 MB = **4.6 GB**. The plan adopts canonical flops for this table only (a new deviation
 item when built), with a suit-permutation map applied to hands and turn/river cards at lookup.
 
-## 3. Cost estimate
+## 3. Cost: measured (one-flop benchmark, 2026-11-08)
 
-Anchors measured on the MSI (i7-14650HX, 12 threads), from the j63 build (`data/abstraction/j63/
-build_report.md`): river OCHS features 0.4 s per 1,000 boards; k-means L2 (8-D), 1.08M points,
-63 clusters, 25 restarts: 48.8 s (≈ 2.4·10¹⁰ distance-flops/s effective); 1-D EMD k-means (L1 on
-CDFs), 1.18M points, 63 clusters, 25 restarts: 105.6 s. Precomputed river table (all 2.6M river
-boards): 1,783 s (Dell). **Everything below is an estimate scaled from those anchors** (linear in
-points × clusters × iterations × restarts); step 1 replaces it with measurements.
+`cargo run --release --bin info6_bench -- --threads 12` on the MSI (i7-14650HX, 12 threads),
+flop [44, 22, 1] (raw card indices), k = 500, seed 1; output kept in `data/info6_bench.out`.
+EMD = G&S Algorithm 2 (`nlhe::potential`). Turn points carry 10.1 non-zero river buckets on
+average, far sparser than the 46 × 500 the old estimate assumed, which is most of the gap.
 
-**Faithful parameters** (500 buckets, full point sets, 25 restarts, exact-size means):
+**Faithful settings** (all points, 25 restarts, exact means): river 52.4 s + turn 424.9 s +
+features/histograms ~5 s ≈ **8 min per flop** → 1,755 canonical flops ≈ **235 h on the MSI
+(~2,800 thread-hours)**, ≈ 44 h on one 64-core node. The earlier estimate (7.8 h per flop,
+~165,000 core-hours) was ~60× too pessimistic and is withdrawn.
 
-| per flop | estimate (12 threads) | why |
-|---|---:|---|
-| river features | ~0.5 s | 1,176 boards |
-| river k-means 500 | ~21 s per restart → **~9 min** | 1.27M × 500 × 8 × ~100 iterations |
-| turn histograms | < 1 s | 53k hands × 46 rivers, table lookups |
-| turn EMD k-means 500 | ~1,100 s per restart → **~7.6 h** | 53k × 500 × ~50 iterations × ~2·10⁴ ops per approximate EMD (46 × ~500 mean support + sort) |
-| **total per flop** | **~7.8 h** | |
-| all 1,755 canonical flops | **~13,700 h ≈ 1.6 years on the MSI; ~165,000 core-hours** | |
+**Noise floors** (what "negligible" is measured against):
+- river: one independent 25-restart fit (different seed) vs the full fit: within-cluster
+  +2.07%, ARI 0.734;
+- turn: best vs second-best of the 25 restarts: within-cluster EMD +1.56%, ARI 0.826.
 
-That is infeasible here and large even for HPC (13× the blueprint's 12,400 core-hours), so the
-paper's team must have cut costs somewhere unpublished. **Reduced parameters** (each a candidate
-ledger item, each measurable against the faithful version on a sample of flops):
+| reduction | speed-up | within-cluster loss vs full | ARI vs full | floor (loss / ARI) | decision |
+|---|---:|---:|---:|---|---|
+| suit isomorphism (1,755 canonical flops) | ×12.6 flops | 0 (lossless) | — | — | **accepted** (user, 2026-11-08) |
+| river: 5 restarts | ×5.4 | +1.08% | 0.733 | +2.07% / 0.734 | **accepted** (within noise) |
+| river: fit on a 200k-point sample, assign all | ×3.7 | −0.87% | 0.797 | +2.07% / 0.734 | **accepted** (within noise) |
+| turn: Hamerly bounds | ×1.3 | 0 (exact; identical buckets) | 1.000 | — | **accepted** (exact) |
+| turn: 5 restarts | ×4.8 | +0.00% measured (best restart was #3 of 25); **expected +1.5%** (best of 5 drawn from the 25 restart values) | 1.000 measured | +1.56% / 0.826 | **at the floor; user decision** |
+| turn: fit on a 10k-point sample | ×3.2 | +0.95% | 0.805 | +1.56% / 0.826 | **rejected** (ARI below the floor) |
+| turn: means truncated to 64 entries | ×1.0 | 0 | 1.000 | — | **rejected** (no speed-up: means are already sparse) |
 
-| reduction | effect on the turn step | effect |
-|---|---|---|
-| fit on a sample of 10,000 turn points per flop, then assign all 53,016 once | ×5.3 fewer points in the fit | quality: measure within-cluster EMD of all points |
-| Elkan/Hamerly bounds (EMD is a metric when the ground distance is) | ~5–20× fewer EMD evaluations (typical for k-means) | exact, no quality change |
-| truncate means to their top 64 entries (renormalised) | ~×8 cheaper EMD | approximation, measure |
-| 5 restarts instead of 25 | ×5 | measure the SSE spread (j63: −1% to −6% from 25 restarts) |
-| river fit on a 200k-point sample | ×6 for the river step | as above |
-
-With all of them: turn ≈ 10–15 s, river ≈ 15 s, assignment ≈ 5 s → **~30–35 s per flop** →
-**~15–17 h for 1,755 flops on the MSI** (12 threads; overnight in ≤ 2 h chunks per CLAUDE.md, resumable
-per flop), or ~1 h on a 64-core HPC node. Memory during the build: < 1 GB per worker. Search-time
-cost: load one 2.65 MB table per flop (~ms); building one flop on demand (~30 s) is too slow for
-search (Pluribus: 1–33 s per search, Main p. 888), so the tables are precomputed.
+**Cost with the accepted set** (river 5 restarts on a 200k sample, turn Hamerly, 25 restarts):
+river ≈ 3 s (product of the two river reductions, not measured together) + turn ≈ 339 s ≈
+**~6 min per flop → ~170 h on the MSI, ~32 h on a 64-core node**. Adding turn 5 restarts:
+~75 s per flop → **~37 h on the MSI** (≤ 2 h chunks, resumable per flop) or ~7 h on HPC.
+Memory: < 1 GB per worker. Search-time cost: load one 2.65 MB table per flop (~ms); building
+on demand (~1–6 min) is far too slow for search (Pluribus 1–33 s per search, Main p. 888), so the
+tables are precomputed.
 
 ## 4. Build plan (when approved)
 
-1. **Benchmark one flop** end to end at faithful and reduced settings; replace §3's estimates with
+1. **(done, §3)** **Benchmark one flop** end to end at faithful and reduced settings; replace §3's estimates with
    measurements; pick the reductions by quality per second (within-cluster EMD on all points;
    bucket-size spread).
 2. **EMD approximation** (G&S Algorithm 2) with known-answer tests: exact EMD from a small
@@ -101,6 +98,6 @@ search (Pluribus: 1–33 s per search, Main p. 888), so the tables are precomput
 
 ## 5. Open questions for the user
 
-- Canonical flops (suit isomorphism) for this table only: needed to keep it at 4.6 GB.
-- Which reductions to accept after step 1, and whether the full build runs on the MSI (~16 h) or
-  on HPC.
+- Canonical flops: approved 2026-11-08. Step 1 done (§3).
+- Turn 5 restarts sits at the noise floor (expected +1.5%): accept only if the build must run on
+  the MSI (~37 h instead of ~170 h); on HPC keep 25 restarts (~32 h on one 64-core node).
