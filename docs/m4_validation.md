@@ -266,3 +266,37 @@ search at 150 / 600 / 2,400 iterations takes 71 / 281 / 1,088 core-s; river 400 
 takes 4 / 69 / 274. The final-iteration plateau is reached inside Pluribus's per-search budget on
 both streets. (Not like for like: Pluribus samples one board per iteration, D-SRCH-12, and its
 subgames have other sizes.)
+
+### Follow-up 3 (2026-11-09): Pluribus-faithful board sampling (D-SRCH-12)
+
+The search solver now samples one board per iteration (`vsolve::with_sampling`, the paper's
+"samples one set of public board cards per thread"; one thread per search here) with Linear CFR
+weighting (iteration t's regrets and average contributions weighted by t, unchanged).
+Unit test: on a turn subgame, sampling (4,400 iterations) and enumeration (100 iterations, about
+the same work) bring the average from 1,667 to 12.0 and 10.5 chips (pot 800); the two average
+strategies differ by 2.4% (reach-weighted) at the root.
+
+Sweep with the sampling solver on all 100 turn subgames (`data/iter_sweep_sampled.tsv`); river
+subgames have no chance nodes, so sampling does not change them (the 9,600 level is new):
+
+| street | iterations | final, % pot | average, % pot | core-s per search (mean, max) |
+|---|---:|---:|---:|---:|
+| turn (sampled) | 6,400 | 31.4 (28.6) | 2.87 (2.69) | 80, 127 |
+| turn (sampled) | 25,600 | 23.1 (22.5) | 0.63 (0.50) | 318, 497 |
+| turn (sampled) | 102,400 | 24.3 (24.0) | 0.23 (0.20) | 1,248, 1,962 |
+| river | 9,600 | 6.3 (4.8) | 0.03 (0.02) | 100, 201 |
+
+Same 51 turn subgames, sampled vs enumerating at about equal compute (mean % of pot):
+
+| compute | final: enumerating / sampled | average: enumerating / sampled |
+|---|---:|---:|
+| ~75 core-s (150 / 6,400 it.) | 21.7 / 27.8 | 2.05 / 2.43 |
+| ~300 core-s (600 / 25,600 it.) | 11.0 / 21.7 | 0.32 / 0.53 |
+| ~1,150 core-s (2,400 / 102,400 it.) | 11.4 / 22.9 | 0.05 / 0.21 |
+
+**Sampling doubles the final iteration's plateau on the turn (~22–23% of the pot vs ~11%)** and
+slows the average's convergence at equal compute (0.21% vs 0.05%): the final iterate now also
+carries the noise of the one river sampled in the last iteration, and each river's blocks are
+updated on ~1/48 of the iterations. The plateau is reached by ~25,600 sampled iterations
+(~320 core-s per search, inside Pluribus's 28–924). **Long-run settings: turn 25,600 / river
+6,400 iterations, sampling (faithful).**
