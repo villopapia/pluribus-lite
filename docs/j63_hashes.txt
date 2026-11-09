@@ -1,5 +1,5 @@
 ﻿# SHA-256 of the Dell's j63 abstraction (25 k-means++ restarts), for cross-machine reproducibility checks
-# Built 2026-11-08 16:40-16:50 on the Dell (DESKTOP-G1K8UGG, i7-10750H) from the code committed as 3381ce7 (unchanged since in nlhe/src):
+# Built 2026-11-08 16:40-16:50 on the Dell (DESKTOP-G1K8UGG, i7-10750H) from the code committed as 8d8842b (unchanged since in nlhe/src):
 #   build_abstraction --config nlhe/configs/pilot_dell_fit11.cfg --out ../data/abstraction/j63 --threads 12 --seed 1 --fit-boards 1000 --max-iters 300 --restarts 25
 # Compare: Get-FileHash data\abstraction\j63\* (SHA256). build_report.md contains timings, so it is expected to differ.
 # sha256  bytes  file

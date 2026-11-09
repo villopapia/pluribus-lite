@@ -51,11 +51,11 @@ below-normal priority; the longest single job was 25 min.
 | item | commit | result |
 |---|---|---|
 | 1 PDF diff | none | blocked: no PDF (paths above) |
-| (previous ask) int regrets | `da47d69` | `cfr::intregret`: exact half-even discounting. No drift over 40 discount steps (mean error < 0.02 chips, max within the analytic bound); floor rounding drifts, which the test detects |
-| 2 lookup evaluator | `6d66cc6` | `eval_lut.rs` matches the `eval.rs` oracle on **every** 5-, 6- and 7-card hand (133.8M sevens, a superset of the 10M sample). 148 M evals/s on 1 thread (2.35× the oracle). River equity: **17.8 µs/board** (was 33.2); MCCFR per-hero path **6.8 µs (1 hero), 8.5 (2), 12.5 (6)** |
-| 3 switch + SLURM | `cb65e12` | `river_method = on_the_fly \| precomputed_table`; direct (hole, board) indexing, bijection-tested; estimator m2_11g = 10.11 GiB; `scripts/slurm_train.sh` (96 h, USR1 → stop file → checkpoint → resubmit); Linux rules in CLAUDE.md |
-| 4 card abstraction | `62370e2` | m2_11g built in **410.7 s** at 12 threads (river 9.6 s, flop 135 s, turn 266 s), peak 593 MB. Flop/turn 256 buckets, none empty; sizes 0.19–2.44× mean (flop), 0.12–2.94× (turn). Details: `docs/m2_abstraction_build.md` |
-| 5 trainer + smoke | `384bfd7` | 82.5M iterations in 44.1 min at 32 buckets; details below and in `docs/m3_smoke.md` |
+| (previous ask) int regrets | `c2fac48` | `cfr::intregret`: exact half-even discounting. No drift over 40 discount steps (mean error < 0.02 chips, max within the analytic bound); floor rounding drifts, which the test detects |
+| 2 lookup evaluator | `a7fca65` | `eval_lut.rs` matches the `eval.rs` oracle on **every** 5-, 6- and 7-card hand (133.8M sevens, a superset of the 10M sample). 148 M evals/s on 1 thread (2.35× the oracle). River equity: **17.8 µs/board** (was 33.2); MCCFR per-hero path **6.8 µs (1 hero), 8.5 (2), 12.5 (6)** |
+| 3 switch + SLURM | `8edd493` | `river_method = on_the_fly \| precomputed_table`; direct (hole, board) indexing, bijection-tested; estimator m2_11g = 10.11 GiB; `scripts/slurm_train.sh` (96 h, USR1 → stop file → checkpoint → resubmit); Linux rules in CLAUDE.md |
+| 4 card abstraction | `cc0e252` | m2_11g built in **410.7 s** at 12 threads (river 9.6 s, flop 135 s, turn 266 s), peak 593 MB. Flop/turn 256 buckets, none empty; sizes 0.19–2.44× mean (flop), 0.12–2.94× (turn). Details: `docs/m2_abstraction_build.md` |
+| 5 trainer + smoke | `68f34b1` | 82.5M iterations in 44.1 min at 32 buckets; details below and in `docs/m3_smoke.md` |
 | 6 this report | (next commit) | |
 
 ## Smoke test (m2_11g tree, 32 post-flop buckets, 12 threads)

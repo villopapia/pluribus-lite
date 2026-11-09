@@ -1,0 +1,50 @@
+# Old -> new commit IDs after removing AI attribution trailers from history (2026-11-09).
+# Trees are unchanged; only commit messages differ. Old history: ../pluribus-lite-backup.bundle (MSI).
+# old new subject
+cd19ce08bbdea24dbf70f3763994ef084f48f5c0 f5a6b78005908f9762c58facc17ffb2f53fc597c M0 data + stats, M1 CFR/MCCFR engine
+8b825376ad81c75f91ce7e3802d54db48676834d 079457342849f6458c1b2cf6657ba2bd331a1501 M0 donk analysis, M1 pruning flag + study
+a3bc5f685da8e6a1f3b9eb0a1207d17da8e8e228 d7e3e641a2db334a079a610eeeca3991a5e2b66b M2 design, betting-tree estimator
+da47d696241b8a8f8496c25c44764c630d92fa45 c2fac484e0c3705e35d13b534cde472a2872775b Integer regret arithmetic: half-even rounding, floor, saturation
+6d66cc673c0b70a7496b40f5b2c55d76fba714a8 a7fca65a3cf4c1b19a4aad80d6f051b7359560a4 Item 2: lookup-table evaluator, river equity batch and per-hero paths
+cb65e128b2293272b4a8f84b316275c4d695aad4 8edd49391eb25bf18d4faff228df1d447221727a Item 3: river_method config switch, direct hand indexing, SLURM stub
+62370e27b6ab9ed45ab8a020a77085df5a5ed311 cc0e25271fa5b7c4a3791e65b10f514a058a204c Item 4: M2 card abstraction (flop/turn k-medians, river cut-offs) + timed build
+384bfd7024218fbde8382c1e18122857c289cb4f 68f34b1f1f13ffe6e2ceea957b3e77f16ec17203 Item 5: M3 blueprint trainer skeleton, 45-min smoke test at 32 buckets
+cadb033e467fba839c48c903771126c513c093c5 a89fce21033338b4571f157a8f12c722149a6ece Item 6: overnight report (results, decisions needed, projections)
+cb2d2def284a9f971772ef5aef50a0dca7e4b444 7d719c521e5d5503461248b48e9a2ff6dad29544 Algorithm 1 diff from the supplement; M1 floor and pruning exception
+db1f31bfd489f4328332014ef22d77bb8671acc0 31419aa72edb93194244cddb45304192c0e69f37 M3 paper-faithful schedule, pruning exception, snapshots; equal-mass river
+64a71dba83c5b2bd53c0c5e87eb0a7b397a7e7cf 357a50cb9288367a83edbd7c8052d02ee056fc8d Fidelity pass: spec, deviations ledger, paper-faithful configs and trainer
+e031e9caed41d61b7d093cbdc1198a4a1a926b8c 8e44d94ffd8e4676cf1100dba3f01c1fa19d5788 Johanson 2013 card abstraction (EMD histograms, OCHS river); reached-sequence counters
+cacb7fe644859f95e24e09c373738a28a2d691d9 091ea10014f9f508fb9ffdd4441c41a130fdda90 Calibrate faithful.cfg to the paper's 664.8M action sequences
+c200c6a77ea31f8bc740fdbc333dadd522c7eacf c4f97d5c9bdffc7ba2b4ebda2b3c67fd3308241d Fidelity docs: sources, spec, deviations ledger, evaluation plan, report
+4c091a425f7d075eb0e680065517f7103f1b53f8 52f108af4f3dfc72b2ed816afa2c3edd706047a7 Handoff: HANDOFF.md, Stanage target, 380.6 GiB derivation, Dell pilot run logged
+5ba9acb63d35e4ea3a73790526177c6fc2012e4f da8acbfb544a85b6b1d5ba3dc4498299e0f2f022 Pilot launcher with stderr/exit-code logging and memory watchdog
+935c51ca55a287645768f7649c9d5aafc02bb65e ca936708bb36d1f0886f1e26f5a7e215e86dde64 Precomputed OCHS river table, in-place snapshots, delete-before-write checkpoints, pruning/phi rulings
+2ce77363126c4c438fa7689c190acc667e125821 814dcf7939ab80a2d98f77189a4162f79746a272 D-ACT-5: compare pot conventions on Pluribus' logged raises
+9e9ba953599ad020a5480bc9793de09c09ce6e37 bf4d1f98951938bb309e6b1a6bd91315ce4d8ab2 Explicit run plan, retention test, S1 cross-check, river benchmark
+107079178b1034f32257a08bce91b50565c5984b ff54fc7db21cd716a4ad546cf541f2b5374eac03 HANDOFF: relaunched pilot (pid 30348), launcher, scheduled task, closed tasks
+c0e68c65c86457b7cc6ee57afa55347c939a5243 f9a5e013cd2adbbc5679bc323d4e3184a64b4eac Phase A2: extended sources review (recommendations only, no code changes)
+f26957bdb9dca1e703b783d92dd89d1daa8bb3bf 5e1da57079e152e7c3da4ac8eba1d4756c9d77cb Sources review: Libratus supplement read (no size sets; different pruning rule; phi lineage)
+3381ce7f23f681c3be526656bf79c525891ab9e3 8d8842b7350a010ebc4ed9dde95f42f5078f9a84 k-means++ 25 restarts (D-INFO-1), D-ACT-7 test, Compact CFR resolves D-ALG-6, dataset validated
+1f717a83667bfc87a18147373556bfd2ee33bd1f d04f3059fa1d1c7c3728d2f3a2ba0d11802f111c HANDOFF: fresh pilot run (pid 6984) on the 25-restart j63
+01ec4c3bcbe2dd2370b4ff689293bb9f5b09b842 8fa1eb03968f8349a252926b9651b9768409dd33 HANDOFF: j200 needs 25-restart rebuild + OCHS table before HPC; dev on the MSI, Dell runs only; broader .gitignore
+ca37d01e5c588fb7ea1bc91abdade3efb4a4e49b eecc9499e80145d4ddf4f0ec2241113f2072fa37 j63 SHA-256s from the Dell, for the cross-machine reproducibility check
+7510c133fee1969376fcdc66dcba886d9a4ad1ae 65423dfeb2487aaf4ed9f64b4496fbc005b19656 analysis: pin Python env (requirements.txt + pip freeze lock) from the MSI setup
+35ea3b993e8b7555d10f8bfce584e71563fc4da3 e933c62cbacbc3af3ad8647567430ada16ffdddc docs: full SHA-256s in fidelity_spec, [38] pending verification; CLAUDE.md lists both machines
+22853bdc62b08842396698b7db6d3172535ea232 5026f2597c550e56b1447636e715485dfb65fb83 docs: [38] hash verified (prefix typo fixed), full SHA-256s in sources_review, close HANDOFF task 8
+0e6c9b59c0af92054ed1f4c6424363c10b4e5b78 3075cf30d9efe3c8766b83afaf6022c3a7ad44a5 M4 stages 1-3: beliefs, subgame construction, continuation strategies (design + tests)
+f813ed16450fa5e4c1c54133955230bfd25fc4a9 2c0088c1afa9cdccf178f4ab4dadb44d2dcd344e sources_review: full SHA-256s of the two saved web pages (Dell's converted .md) + Wayback links
+f996c9277c59e545e680df6a1b82563c61a0f95e f5782f441477a873314f3966264e03f88a8d0323 D-SRCH-3: calibrate search raise sizes to 100-2,000 subgame sequences; ledger updates
+b9dacc286178a1f4b9a462735db1ea60dd5f7899 7320b77f62dae0ab11a50f5f5d5b361a2ed403e4 M4 stages 4-5 (Leduc): Linear MCCFR + vector Linear CFR subgame solvers; Algorithm 2 agent
+031de70a00d5225b0d980786b9c09803a13c03f2 86d5c8ad6711772ed4e67d685565ab28efb54294 M4: Leduc validation of nested search; D-INFO-6 build plan; ledger D-SRCH-11..13
+852c0bd2d7ac18616da010b55546a2255856cb1f d2c53a3ab7c3b2380bde85fcb516de4070880a8c Config format version (version = N, players); hu_dev config; Leduc study reframed
+2b00edad2398a17f05b9b11397a6a551bfc1cb67 36ed7113ac7bb0d834350c6b9f0c2da18028b36f Watchdog pause/resume: STOP.watchdog marker, resume after 10 min above 3 GB
+eb7829dd1fb25375a0c28430ec8163364183d93e 5699f0d5cd1aceb0e58376eb06884abdfbafa9af HANDOFF: watchdog pause/resume, resumed pid 33564, re-projected peak RAM
+a2c0e857f311902c12eeff1df9e334ac00e59943 a8a9b6413c2b44e35bec18fb53ae73d80382426b D-SRCH-3: later-street alternatives measured; recommend pot_bet_hu (97.2% in range, median 504)
+6523d7a065d3fb44d18fc2f3132e358fa5db07b4 a2918ad2706c424876e27bfe47b03a64374ee657 D-SRCH-14: preflop search triggers 125/10,000 hands (faithful sizes); subgame size per folded-players reading
+8ff88dc0647d3ee482b199b3a24bc182cf7effd9 f53abb4ef06806365725b5a110b83b8c62726de0 NLHE heads-up vector Linear CFR solver; AddAction in subgames; potential-aware EMD clustering + D-INFO-6 benchmark tool
+d511599e021adf1aafc04ab6e3e5234284355464 f51c9edef5faa4decbdc2f8b92b54e6dd4299946 NLHE heads-up Algorithm 2 agents and match runner; solver showdown cache; benchmark noise floors
+f7ea3158caa09835baa6655e76e9f05acb260ed3 e557458f2735325b933f06d265ebe5394a1a5e4e ledger: D-SRCH-15 (lossless HU subgames), D-SRCH-16 (blueprint opponent translation), D-EVAL-2 (AIVAT-style chance terms)
+06757798fa2030f34ab281758bc8251d51265e08 188195fe5b907d5bc1276de32c237b7d786a0478 D-INFO-6: one-flop benchmark measured; accept/reject each reduction against noise floors
+b052959ad00977961cab75f0e2397f79c99699f3 bd9080ac1f98f9572e8316cba3e878a53339eba0 vsolve: pooled buffers and f32 regret tables (20 concurrent turn solves paged: ~570 MB each in f64)
+c29bbd5a79c435003809a23d0f6138217cf8155c 5c95a0e7d603fdf1db4d3b0f56883145ab7ab5cb No AI attribution: commit-msg hook strips Claude trailers; CLAUDE.md rule
+2cfceb17e665e64f93a33f48f7fa8be94b5e306d 6bcd01dc3babc1a8b2a5675437a5337b3de72e75 Hooks: force LF line endings
