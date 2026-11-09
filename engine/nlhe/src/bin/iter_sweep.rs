@@ -6,7 +6,8 @@
 //!   [--turn 100] [--river-levels 400,1600,6400,25600] [--turn-levels 150,600,2400,9600]
 //!   [--threads 12] [--max-secs 3600] [--dump FILE]`  /  `iter_sweep --summary --out FILE`
 //!
-//! The first `--river` river and `--turn` turn subgames of the file (in file order) are solved,
+//! The first `--river` distinct river and `--turn` distinct turn subgames of the file (in file
+//! order) are solved,
 //! longest jobs first; one TSV row per (subgame, level). Resumable: subgames with all levels in
 //! `--out` are skipped; `--max-secs` stops starting new subgames (≤ 2 h chunks). `--dump` writes
 //! the root strategies (average and final, every hand) at the first level, for the f32/f64
@@ -91,8 +92,14 @@ fn main() {
 
     let text = std::fs::read_to_string(get("--subgames", "../data/subgames.txt")).expect("read subgames");
     let (mut river, mut turn) = (Vec::new(), Vec::new());
+    // identical subgames (same root, beliefs, frozen entries; e.g. both seats of a duplicate deal
+    // with the same pre-turn play) are counted once
+    let mut seen = HashSet::new();
     for l in text.lines() {
         let (id, rest) = l.split_once(" | ").expect("capture line");
+        if !seen.insert(rest) {
+            continue;
+        }
         let nb: usize = rest.split_whitespace().next().unwrap().parse().unwrap();
         match nb {
             5 if river.len() < n_river => river.push((id.to_string(), rest)),

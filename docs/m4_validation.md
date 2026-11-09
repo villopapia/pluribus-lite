@@ -195,3 +195,42 @@ memory, not compute: a heads-up turn subgame holds ~9k (node, river) blocks of r
 average sums, ~570 MB in f64, so 20 concurrent solvers paged on 16 GB. Fixed in `b052959`
 (f32 tables, pooled buffers, 12 threads): 12 concurrent turn solves now take 2.1× the
 single-solve time.
+
+### Follow-up 1 (2026-11-09): normalised exploitability, full AIVAT, f32 vs f64
+
+Rerun of the same 400 deals (seed 1, identical hands; raw and chance-only estimates reproduce
+exactly), `hu_match ... --out ../data/hu_match_s1.tsv --capture ../data/subgames_s1.txt`.
+
+**Exploitability within the river subgames** (256 searches; % of pot averaged per search, pot =
+both contributions at the subgame root; 1 chip = 10 mbb):
+
+| strategy | chips | mbb | % of pot |
+|---|---:|---:|---:|
+| final iteration (played, paper) | 124.6 | 1,246 | **16.4%** |
+| weighted average (σ) | 4.4 | 44 | **0.61%** |
+
+**Full AIVAT** (D-EVAL-2): decision terms at both agents' decisions with the actor's exact
+action distribution; ṽ = the search's value of the full history where the search agent acts in a
+solved subgame (both hands known, final-iteration strategies, river enumerated), else the equity
+value with any outstanding bet counted as returned (the blueprint stores no values).
+
+| estimator | mbb/hand | s.e. | 95% CI | variance vs raw |
+|---|---:|---:|---|---:|
+| raw | +390.6 | 395.8 | [−385, +1,166] | ×1 |
+| AIVAT chance terms | +353.9 | 351.0 | [−334, +1,042] | ×1.27 lower |
+| **AIVAT full** | **+480.6** | **296.9** | **[−101, +1,063]** | **×1.78 lower** |
+
+Still not significant. Unbiasedness check (`hu_agent::tests::aivat_terms_are_unbiased_and_reduce_variance`,
+3,000 hands of fixed-probability agents on real heads-up hands): mean correction −8 ± 122
+chips (0 within s.e.); variance raw 43.0M → chance terms 15.5M → full 10.8M. Valuing an uncalled
+bet as already in the pot (the first version) was unbiased too but *raised* the variance
+(20.7M); counting it as returned fixed that.
+
+Hands needed with full AIVAT (per-deal s.d. 5,940 mbb, a deal = 2 hands): 95% CI half-width
+±200 mbb/hand ≈ 6,800 hands; ±100 ≈ 27,100 hands; s.e. 50 ≈ 28,200 hands.
+
+**f32 vs f64 tables** (D-SRCH-17): 20 captured subgames (10 turn, 10 river) at 150/400
+iterations: root average strategies differ by 2.3% reach-weighted (max 7.9%); exploitability of
+the average differs by 0.07% of pot on average (max 0.66%), without a consistent direction (mean
+turn 2.38% vs 2.37%, river 0.55% vs 0.47%); game values by 0.015% of pot. The final iteration
+differs more (2.1 points of pot on average): it is a single noisy iterate either way.
