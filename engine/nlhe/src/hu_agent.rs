@@ -350,6 +350,7 @@ impl<'a> SearchAgent<'a> {
         self.solver = Some(s);
         self.stats.searches += 1;
         self.stats.search_secs += t0.elapsed().as_secs_f64();
+        if std::env::var_os("HU_DEBUG").is_some() { let s = self.solver.as_ref().unwrap(); eprintln!("search board {} nodes {} extra {} iters {} root {:?} {:.1}s", self.board.len(), s.g.nodes.len(), self.extra.len(), s.iterations, root.total, t0.elapsed().as_secs_f64()); }
     }
 
     /// Likelihood of each hand taking action index `ai` at subgame node `node` (σ = average).

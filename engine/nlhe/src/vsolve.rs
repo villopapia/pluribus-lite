@@ -22,9 +22,11 @@ use std::collections::HashMap;
 
 const NO_CARD: u64 = 63;
 
+/// Regrets and average-strategy sums of one (node, later cards) block, f32 to halve memory
+/// (a heads-up turn subgame holds ~9k blocks: ~280 MB in f32).
 struct Block {
-    reg: Vec<f64>,
-    sum: Vec<f64>,
+    reg: Vec<f32>,
+    sum: Vec<f32>,
 }
 
 pub struct VectorSolver {
@@ -37,6 +39,7 @@ pub struct VectorSolver {
     combos: Vec<(u8, u8)>,
     blocks: HashMap<u64, Block>,
     ranks: HashMap<u64, (Vec<u16>, Vec<u16>)>,
+    pool: Vec<Vec<f64>>,
     /// normaliser: total weight of card-compatible hand pairs at the root
     pub z: f64,
     pub iterations: u64,
@@ -60,15 +63,26 @@ impl VectorSolver {
                 }
             }
         }
-        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), z: 1.0, iterations: 0 };
-        let r1 = s.ranges[1].clone();
-        s.z = s.compat_sums(&r1).iter().zip(&s.ranges[0]).map(|(c, r)| c * r).sum();
+        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), pool: Vec::new(), z: 1.0, iterations: 0 };
+        let mut c = vec![0f64; COMBOS];
+        s.compat_into(&s.ranges[1], 1.0, &mut c);
+        s.z = c.iter().zip(&s.ranges[0]).map(|(c, r)| c * r).sum();
         assert!(s.z > 0.0, "no card-compatible pair of hands has positive belief");
         s
     }
 
-    /// For each hand h: Σ_o reach[o] over opponent hands o sharing no card with h.
-    fn compat_sums(&self, reach: &[f64]) -> Vec<f64> {
+    /// A zeroed buffer of length `n` from the pool. The hot path allocates nothing after warm-up:
+    /// with one solver per thread, per-node allocations serialised on the Windows heap lock
+    /// (20 concurrent searches ran ~50x slower than one).
+    fn take(&mut self, n: usize) -> Vec<f64> {
+        let mut v = self.pool.pop().unwrap_or_default();
+        v.clear();
+        v.resize(n, 0.0);
+        v
+    }
+
+    /// out[h] = scale · Σ_o reach[o] over opponent hands o sharing no card with h.
+    fn compat_into(&self, reach: &[f64], scale: f64, out: &mut [f64]) {
         let total: f64 = reach.iter().sum();
         let mut per = [0f64; 52];
         for (h, &r) in reach.iter().enumerate() {
@@ -76,12 +90,17 @@ impl VectorSolver {
             per[a as usize] += r;
             per[b as usize] += r;
         }
-        (0..COMBOS)
-            .map(|h| {
-                let (a, b) = self.combos[h];
-                total - per[a as usize] - per[b as usize] + reach[h]
-            })
-            .collect()
+        for h in 0..COMBOS {
+            let (a, b) = self.combos[h];
+            out[h] = scale * (total - per[a as usize] - per[b as usize] + reach[h]);
+        }
+    }
+
+    #[cfg(test)]
+    fn compat_sums(&self, reach: &[f64]) -> Vec<f64> {
+        let mut v = vec![0f64; COMBOS];
+        self.compat_into(reach, 1.0, &mut v);
+        v
     }
 
     /// Hand ranks on a full board (0 = hand blocked by the board) and the unblocked hands sorted
@@ -99,29 +118,31 @@ impl VectorSolver {
         key
     }
 
-    /// Σ_o reach[o]·compat(h, o)·sign(rank h − rank o) on a full board, by a sweep.
-    fn showdown(&mut self, board: &[u8], reach: &[f64]) -> Vec<f64> {
+    /// out[h] += scale · Σ_o reach[o]·compat(h, o)·sign(rank h − rank o) on a full board, by a
+    /// sweep over hands sorted by strength. `out` must be zeroed.
+    fn showdown_into(&mut self, board: &[u8], reach: &[f64], scale: f64, out: &mut [f64]) {
         let key = self.ensure_ranks(board);
         let (ranks, order) = &self.ranks[&key];
-        let order: Vec<usize> = order.iter().map(|&h| h as usize).collect();
-        let mut out = vec![0f64; COMBOS];
+        let combos = &self.combos;
+        let rk = |k: usize| ranks[order[k] as usize];
         // weaker: ascending sweep, groups of equal rank
         let (mut tot, mut per) = (0f64, [0f64; 52]);
         let mut i = 0;
         while i < order.len() {
             let mut j = i;
-            while j < order.len() && ranks[order[j]] == ranks[order[i]] {
+            while j < order.len() && rk(j) == rk(i) {
                 j += 1;
             }
             for &h in &order[i..j] {
-                let (a, b) = self.combos[h];
-                out[h] += tot - per[a as usize] - per[b as usize];
+                let (a, b) = combos[h as usize];
+                out[h as usize] += tot - per[a as usize] - per[b as usize];
             }
             for &h in &order[i..j] {
-                let (a, b) = self.combos[h];
-                tot += reach[h];
-                per[a as usize] += reach[h];
-                per[b as usize] += reach[h];
+                let (a, b) = combos[h as usize];
+                let r = reach[h as usize];
+                tot += r;
+                per[a as usize] += r;
+                per[b as usize] += r;
             }
             i = j;
         }
@@ -130,22 +151,32 @@ impl VectorSolver {
         let mut i = order.len();
         while i > 0 {
             let mut j = i;
-            while j > 0 && ranks[order[j - 1]] == ranks[order[i - 1]] {
+            while j > 0 && rk(j - 1) == rk(i - 1) {
                 j -= 1;
             }
             for &h in &order[j..i] {
-                let (a, b) = self.combos[h];
-                out[h] -= tot - per[a as usize] - per[b as usize];
+                let (a, b) = combos[h as usize];
+                out[h as usize] -= tot - per[a as usize] - per[b as usize];
             }
             for &h in &order[j..i] {
-                let (a, b) = self.combos[h];
-                tot += reach[h];
-                per[a as usize] += reach[h];
-                per[b as usize] += reach[h];
+                let (a, b) = combos[h as usize];
+                let r = reach[h as usize];
+                tot += r;
+                per[a as usize] += r;
+                per[b as usize] += r;
             }
             i = j;
         }
-        out
+        if scale != 1.0 {
+            out.iter_mut().for_each(|x| *x *= scale);
+        }
+    }
+
+    #[cfg(test)]
+    fn showdown(&mut self, board: &[u8], reach: &[f64]) -> Vec<f64> {
+        let mut v = vec![0f64; COMBOS];
+        self.showdown_into(board, reach, 1.0, &mut v);
+        v
     }
 
     fn key(node: u32, board: &[u8], root_len: usize) -> u64 {
@@ -160,37 +191,36 @@ impl VectorSolver {
         k
     }
 
-    /// Current strategy (regret matching) at (node, board) for every hand, row-major n per hand.
-    fn current(&self, key: u64, n: usize) -> Vec<f64> {
-        let mut s = vec![1.0 / n as f64; COMBOS * n];
-        if let Some(b) = self.blocks.get(&key) {
-            for h in 0..COMBOS {
-                let r = &b.reg[h * n..(h + 1) * n];
-                let pos: f64 = r.iter().map(|x| x.max(0.0)).sum();
-                if pos > 0.0 {
-                    for a in 0..n {
-                        s[h * n + a] = r[a].max(0.0) / pos;
-                    }
-                }
-            }
-        }
-        s
-    }
-
-    fn average(&self, key: u64, n: usize) -> Vec<f64> {
-        let mut s = self.current(key, n);
-        if let Some(b) = self.blocks.get(&key) {
-            for h in 0..COMBOS {
-                let r = &b.sum[h * n..(h + 1) * n];
-                let tot: f64 = r.iter().sum();
+    /// Strategy at (node, board) for every hand, row-major n per hand: regret matching
+    /// (`avg` false) or the weighted average (regret matching where it is still empty).
+    fn fill_strategy(&self, key: u64, n: usize, avg: bool, s: &mut [f64]) {
+        let u = 1.0 / n as f64;
+        let Some(b) = self.blocks.get(&key) else {
+            s.fill(u);
+            return;
+        };
+        for h in 0..COMBOS {
+            let row = &mut s[h * n..(h + 1) * n];
+            if avg {
+                let sm = &b.sum[h * n..(h + 1) * n];
+                let tot: f64 = sm.iter().map(|&x| x as f64).sum();
                 if tot > 0.0 {
                     for a in 0..n {
-                        s[h * n + a] = r[a] / tot;
+                        row[a] = sm[a] as f64 / tot;
                     }
+                    continue;
                 }
             }
+            let r = &b.reg[h * n..(h + 1) * n];
+            let pos: f64 = r.iter().map(|&x| x.max(0.0) as f64).sum();
+            if pos > 0.0 {
+                for a in 0..n {
+                    row[a] = r[a].max(0.0) as f64 / pos;
+                }
+            } else {
+                row.fill(u);
+            }
         }
-        s
     }
 
     fn apply_frozen(&self, node: u32, n: usize, s: &mut [f64]) {
@@ -203,27 +233,33 @@ impl VectorSolver {
 
     /// Counterfactual values for player `i` (`br`: best response for `i` against `avg`
     /// (true) or final (false) strategies; otherwise a CFR pass at iteration weight `t`).
+    /// The returned buffer comes from the pool; callers hand it back.
     fn walk(&mut self, node: u32, board: &mut Vec<u8>, reach: &[Vec<f64>; 2], i: usize, t: f64, br: Option<bool>) -> Vec<f64> {
         let nd = self.g.nodes[node as usize];
         let o = 1 - i;
         match nd.kind {
             Kind::FoldEnd => {
                 let pay = if nd.state.folded & (1 << i) != 0 { -(nd.state.total[i] as f64) } else { nd.state.total[o] as f64 };
-                self.compat_sums(&reach[o]).into_iter().map(|c| pay * c / self.z).collect()
+                let mut v = self.take(COMBOS);
+                self.compat_into(&reach[o], pay / self.z, &mut v);
+                v
             }
             Kind::Showdown if board.len() == 5 => {
-                let t_amt = nd.state.total[o] as f64;
-                let b = board.clone();
-                self.showdown(&b, &reach[o]).into_iter().map(|x| t_amt * x / self.z).collect()
+                let scale = nd.state.total[o] as f64 / self.z;
+                let mut v = self.take(COMBOS);
+                self.showdown_into(board, &reach[o], scale, &mut v);
+                v
             }
             Kind::Showdown | Kind::Chance => {
                 // deal the next card: every card not on the board (and not in either hand)
                 let child = if nd.kind == Kind::Chance { Some(self.g.child(node, 0)) } else { None };
-                let unseen = 52 - board.len() - 4;
-                let mut v = vec![0f64; COMBOS];
+                let w = 1.0 / (52 - board.len() - 4) as f64;
+                let mut v = self.take(COMBOS);
+                let mut r2 = [self.take(COMBOS), self.take(COMBOS)];
                 let bm = mask(board);
                 for c in (0..52u8).filter(|&c| bm & (1 << c) == 0) {
-                    let mut r2 = reach.clone();
+                    r2[0].copy_from_slice(&reach[0]);
+                    r2[1].copy_from_slice(&reach[1]);
                     for (h, &(a, b)) in self.combos.iter().enumerate() {
                         if a == c || b == c {
                             r2[0][h] = 0.0;
@@ -231,17 +267,16 @@ impl VectorSolver {
                         }
                     }
                     board.push(c);
-                    let vc = match child {
-                        Some(ch) => self.walk(ch, board, &r2, i, t, br),
-                        None => self.walk(node, board, &r2, i, t, br),
-                    };
+                    let vc = self.walk(child.unwrap_or(node), board, &r2, i, t, br);
                     board.pop();
                     for (h, &(a, b)) in self.combos.iter().enumerate() {
                         if a != c && b != c {
-                            v[h] += vc[h] / unseen as f64;
+                            v[h] += vc[h] * w;
                         }
                     }
+                    self.pool.push(vc);
                 }
+                self.pool.extend(r2);
                 v
             }
             Kind::Leaf => unreachable!(),
@@ -249,43 +284,42 @@ impl VectorSolver {
                 let p = nd.state.to_act as usize;
                 let n = nd.n as usize;
                 let key = Self::key(node, board, self.board.len());
-                let mut sig = match br {
-                    Some(true) => self.average(key, n),
-                    _ => self.current(key, n),
-                };
+                let mut sig = self.take(COMBOS * n);
+                self.fill_strategy(key, n, br == Some(true), &mut sig);
                 self.apply_frozen(node, n, &mut sig);
+                let mut v = self.take(COMBOS);
                 if p == i {
                     let mut va = Vec::with_capacity(n);
                     for a in 0..n {
                         let ch = self.g.child(node, a);
                         va.push(self.walk(ch, board, reach, i, t, br));
                     }
-                    let mut v = vec![0f64; COMBOS];
                     if br.is_some() {
                         for h in 0..COMBOS {
                             v[h] = (0..n).map(|a| va[a][h]).fold(f64::NEG_INFINITY, f64::max);
                         }
-                        return v;
-                    }
-                    for h in 0..COMBOS {
-                        v[h] = (0..n).map(|a| sig[h * n + a] * va[a][h]).sum();
-                    }
-                    let frozen: Vec<u16> = self.frozen.keys().filter(|(nd2, _)| *nd2 == node).map(|&(_, h)| h).collect();
-                    let blk = self.blocks.entry(key).or_insert_with(|| Block { reg: vec![0.0; COMBOS * n], sum: vec![0.0; COMBOS * n] });
-                    for h in 0..COMBOS {
-                        if reach[i][h] == 0.0 && v[h] == 0.0 || frozen.contains(&(h as u16)) {
-                            continue;
+                    } else {
+                        for h in 0..COMBOS {
+                            v[h] = (0..n).map(|a| sig[h * n + a] * va[a][h]).sum();
                         }
-                        for a in 0..n {
-                            blk.reg[h * n + a] += t * (va[a][h] - v[h]);
-                            blk.sum[h * n + a] += t * reach[i][h] * sig[h * n + a];
+                        let frozen: Vec<u16> = self.frozen.keys().filter(|(nd2, _)| *nd2 == node).map(|&(_, h)| h).collect();
+                        let blk = self.blocks.entry(key).or_insert_with(|| Block { reg: vec![0.0; COMBOS * n], sum: vec![0.0; COMBOS * n] });
+                        for h in 0..COMBOS {
+                            if reach[i][h] == 0.0 && v[h] == 0.0 || frozen.contains(&(h as u16)) {
+                                continue;
+                            }
+                            for a in 0..n {
+                                blk.reg[h * n + a] += (t * (va[a][h] - v[h])) as f32;
+                                blk.sum[h * n + a] += (t * reach[i][h] * sig[h * n + a]) as f32;
+                            }
                         }
                     }
-                    v
+                    self.pool.extend(va);
                 } else {
-                    let mut v = vec![0f64; COMBOS];
+                    let mut r2 = [self.take(COMBOS), self.take(COMBOS)];
                     for a in 0..n {
-                        let mut r2 = reach.clone();
+                        r2[0].copy_from_slice(&reach[0]);
+                        r2[1].copy_from_slice(&reach[1]);
                         for h in 0..COMBOS {
                             r2[p][h] *= sig[h * n + a];
                         }
@@ -294,9 +328,12 @@ impl VectorSolver {
                         for h in 0..COMBOS {
                             v[h] += va[h];
                         }
+                        self.pool.push(va);
                     }
-                    v
+                    self.pool.extend(r2);
                 }
+                self.pool.push(sig);
+                v
             }
         }
     }
@@ -309,7 +346,8 @@ impl VectorSolver {
             let t = self.iterations as f64;
             for i in 0..2 {
                 let mut b = self.board.clone();
-                self.walk(0, &mut b, &reach, i, t, None);
+                let v = self.walk(0, &mut b, &reach, i, t, None);
+                self.pool.push(v);
             }
         }
     }
@@ -320,7 +358,8 @@ impl VectorSolver {
         let mut b = self.board.clone();
         b.extend_from_slice(later_cards);
         let key = Self::key(node, &b, self.board.len());
-        let s = if avg { self.average(key, n) } else { self.current(key, n) };
+        let mut s = vec![0f64; COMBOS * n];
+        self.fill_strategy(key, n, avg, &mut s);
         if let Some(f) = self.frozen.get(&(node, combo as u16)) {
             return f.clone();
         }
@@ -334,7 +373,8 @@ impl VectorSolver {
         let mut b = self.board.clone();
         b.extend_from_slice(later_cards);
         let key = Self::key(node, &b, self.board.len());
-        let mut s = if avg { self.average(key, n) } else { self.current(key, n) };
+        let mut s = vec![0f64; COMBOS * n];
+        self.fill_strategy(key, n, avg, &mut s);
         self.apply_frozen(node, n, &mut s);
         s
     }
