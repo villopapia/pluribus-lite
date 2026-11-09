@@ -22,11 +22,28 @@ use std::collections::HashMap;
 
 const NO_CARD: u64 = 63;
 
-/// Regrets and average-strategy sums of one (node, later cards) block, f32 to halve memory
-/// (a heads-up turn subgame holds ~9k blocks: ~280 MB in f32).
+/// Table precision: f32 by default (a heads-up turn subgame holds ~9k blocks, ~280 MB in f32);
+/// `--features f64-tables` for the f64 comparison (D-SRCH-17).
+#[cfg(not(feature = "f64-tables"))]
+pub type Acc = f32;
+#[cfg(feature = "f64-tables")]
+pub type Acc = f64;
+
+/// Regrets and average-strategy sums of one (node, later cards) block.
 struct Block {
-    reg: Vec<f32>,
-    sum: Vec<f32>,
+    reg: Vec<Acc>,
+    sum: Vec<Acc>,
+}
+
+/// What a pass over the tree computes for the traverser.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// Linear CFR update at iteration weight t (current strategies)
+    Cfr(f64),
+    /// best response against the average (true) or final (false) strategies
+    Br(bool),
+    /// expected value under the average (true) or final (false) strategies, no update
+    Ev(bool),
 }
 
 pub struct VectorSolver {
@@ -231,10 +248,9 @@ impl VectorSolver {
         }
     }
 
-    /// Counterfactual values for player `i` (`br`: best response for `i` against `avg`
-    /// (true) or final (false) strategies; otherwise a CFR pass at iteration weight `t`).
+    /// Counterfactual values for player `i` under `mode`.
     /// The returned buffer comes from the pool; callers hand it back.
-    fn walk(&mut self, node: u32, board: &mut Vec<u8>, reach: &[Vec<f64>; 2], i: usize, t: f64, br: Option<bool>) -> Vec<f64> {
+    fn walk(&mut self, node: u32, board: &mut Vec<u8>, reach: &[Vec<f64>; 2], i: usize, mode: Mode) -> Vec<f64> {
         let nd = self.g.nodes[node as usize];
         let o = 1 - i;
         match nd.kind {
@@ -267,7 +283,7 @@ impl VectorSolver {
                         }
                     }
                     board.push(c);
-                    let vc = self.walk(child.unwrap_or(node), board, &r2, i, t, br);
+                    let vc = self.walk(child.unwrap_or(node), board, &r2, i, mode);
                     board.pop();
                     for (h, &(a, b)) in self.combos.iter().enumerate() {
                         if a != c && b != c {
@@ -285,16 +301,16 @@ impl VectorSolver {
                 let n = nd.n as usize;
                 let key = Self::key(node, board, self.board.len());
                 let mut sig = self.take(COMBOS * n);
-                self.fill_strategy(key, n, br == Some(true), &mut sig);
+                self.fill_strategy(key, n, matches!(mode, Mode::Br(true) | Mode::Ev(true)), &mut sig);
                 self.apply_frozen(node, n, &mut sig);
                 let mut v = self.take(COMBOS);
                 if p == i {
                     let mut va = Vec::with_capacity(n);
                     for a in 0..n {
                         let ch = self.g.child(node, a);
-                        va.push(self.walk(ch, board, reach, i, t, br));
+                        va.push(self.walk(ch, board, reach, i, mode));
                     }
-                    if br.is_some() {
+                    if let Mode::Br(_) = mode {
                         for h in 0..COMBOS {
                             v[h] = (0..n).map(|a| va[a][h]).fold(f64::NEG_INFINITY, f64::max);
                         }
@@ -302,6 +318,8 @@ impl VectorSolver {
                         for h in 0..COMBOS {
                             v[h] = (0..n).map(|a| sig[h * n + a] * va[a][h]).sum();
                         }
+                    }
+                    if let Mode::Cfr(t) = mode {
                         let frozen: Vec<u16> = self.frozen.keys().filter(|(nd2, _)| *nd2 == node).map(|&(_, h)| h).collect();
                         let blk = self.blocks.entry(key).or_insert_with(|| Block { reg: vec![0.0; COMBOS * n], sum: vec![0.0; COMBOS * n] });
                         for h in 0..COMBOS {
@@ -309,8 +327,8 @@ impl VectorSolver {
                                 continue;
                             }
                             for a in 0..n {
-                                blk.reg[h * n + a] += (t * (va[a][h] - v[h])) as f32;
-                                blk.sum[h * n + a] += (t * reach[i][h] * sig[h * n + a]) as f32;
+                                blk.reg[h * n + a] += (t * (va[a][h] - v[h])) as Acc;
+                                blk.sum[h * n + a] += (t * reach[i][h] * sig[h * n + a]) as Acc;
                             }
                         }
                     }
@@ -324,7 +342,7 @@ impl VectorSolver {
                             r2[p][h] *= sig[h * n + a];
                         }
                         let ch = self.g.child(node, a);
-                        let va = self.walk(ch, board, &r2, i, t, br);
+                        let va = self.walk(ch, board, &r2, i, mode);
                         for h in 0..COMBOS {
                             v[h] += va[h];
                         }
@@ -346,7 +364,7 @@ impl VectorSolver {
             let t = self.iterations as f64;
             for i in 0..2 {
                 let mut b = self.board.clone();
-                let v = self.walk(0, &mut b, &reach, i, t, None);
+                let v = self.walk(0, &mut b, &reach, i, Mode::Cfr(t));
                 self.pool.push(v);
             }
         }
@@ -383,8 +401,36 @@ impl VectorSolver {
     pub fn best_response_value(&mut self, i: usize, avg: bool) -> f64 {
         let reach = self.ranges.clone();
         let mut b = self.board.clone();
-        let v = self.walk(0, &mut b, &reach, i, 0.0, Some(avg));
-        v.iter().zip(&self.ranges[i]).map(|(x, r)| x * r).sum()
+        let v = self.walk(0, &mut b, &reach, i, Mode::Br(avg));
+        let r = v.iter().zip(&self.ranges[i]).map(|(x, r)| x * r).sum();
+        self.pool.push(v);
+        r
+    }
+
+    /// Expected value for player 0 of the strategy pair (average or final) over the beliefs,
+    /// chips per hand.
+    pub fn game_value(&mut self, avg: bool) -> f64 {
+        let reach = self.ranges.clone();
+        let mut b = self.board.clone();
+        let v = self.walk(0, &mut b, &reach, 0, Mode::Ev(avg));
+        let r = v.iter().zip(&self.ranges[0]).map(|(x, r)| x * r).sum();
+        self.pool.push(v);
+        r
+    }
+
+    /// Expected chips for seat 0 from `node` (cards dealt since the root: `later`) when the seats
+    /// hold combos `c`, under the final (or average) strategies, later cards enumerated: the
+    /// search's value of a full history, used as ṽ by AIVAT (`hu_agent::play_hand`).
+    pub fn pair_value(&mut self, node: u32, later: &[u8], c: [usize; 2], avg: bool) -> f64 {
+        let mut reach = [vec![0f64; COMBOS], vec![0f64; COMBOS]];
+        reach[0][c[0]] = 1.0;
+        reach[1][c[1]] = 1.0;
+        let mut b = self.board.clone();
+        b.extend_from_slice(later);
+        let v = self.walk(node, &mut b, &reach, 0, Mode::Ev(avg));
+        let r = v[c[0]] * self.z;
+        self.pool.push(v);
+        r
     }
 
     /// Exploitability of the average (or final) strategy pair within the subgame, chips/hand.
@@ -500,5 +546,49 @@ mod tests {
         assert_eq!(s.strategy(0, &[], h, true), vec![0.25, 0.75]);
         assert_eq!(s.strategy(0, &[], h, false), vec![0.25, 0.75]);
         let _ = (Action::Call, Next::Terminal);
+    }
+
+    #[test]
+    fn pair_values_average_to_the_game_value() {
+        // turn root (river enumerated): game value = Σ r0[h] r1[o] compat(h,o) pair_value(h,o) / z
+        let rules = Rules { players: 2, ..Rules::default() };
+        let cfg = AbstractionConfig::parse("allin = true
+turn.0 = 1
+river.0 = 1").unwrap();
+        let mut t = [0u32; 6];
+        t[0] = 300;
+        t[1] = 300;
+        let g = Subgame::build(&rules, &cfg, round_start(&rules, 2, t, 0));
+        let mut rng = Rng::new(3);
+        let board = [2u8, 17, 30, 41];
+        let pick = |rng: &mut Rng| -> Vec<f64> {
+            let mut r = vec![0f64; COMBOS];
+            while r.iter().filter(|&&x| x > 0.0).count() < 4 {
+                let (a, b) = (rng.next_u64() % 52, rng.next_u64() % 52);
+                if a != b && !board.contains(&(a as u8)) && !board.contains(&(b as u8)) {
+                    r[combo_index(a as u8, b as u8)] = 0.5 + rng.next_f64();
+                }
+            }
+            r
+        };
+        let (r0, r1) = (pick(&mut rng), pick(&mut rng));
+        let mut s = VectorSolver::new(g, rules, &board, [r0.clone(), r1.clone()]);
+        s.run(30);
+        for avg in [false, true] {
+            let gv = s.game_value(avg);
+            let combos = combo_cards();
+            let mut sum = 0.0;
+            for h in (0..COMBOS).filter(|&h| r0[h] > 0.0) {
+                for o in (0..COMBOS).filter(|&o| r1[o] > 0.0) {
+                    let (a, b) = combos[h];
+                    let (c, d) = combos[o];
+                    if a == c || a == d || b == c || b == d {
+                        continue;
+                    }
+                    sum += r0[h] * r1[o] * s.pair_value(0, &[], [h, o], avg);
+                }
+            }
+            assert!((gv - sum / s.z).abs() < 1e-6 * (1.0 + gv.abs()), "avg {avg}: {gv} vs {}", sum / s.z);
+        }
     }
 }

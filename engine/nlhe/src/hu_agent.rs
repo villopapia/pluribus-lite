@@ -13,18 +13,23 @@
 //!   (`vsolve`), play the final iteration; freeze σ(I) (average) for our actual hand when we act;
 //!   an opponent action missing from the subgame is added at its state (AddAction) and the
 //!   subgame is searched again from the round root.
-//! * [`play_hand`]: one hand; returns each seat's chips and the AIVAT-style chance correction
-//!   (equity value function, D-EVAL-2).
+//! * [`play_hand`]: one hand; returns each seat's chips and the AIVAT corrections [Burch et al.
+//!   2018]: chance terms (equity value function) and decision terms at both agents' decisions,
+//!   which use the actor's exact action distribution (`Agent::last_policy`) and ṽ = the search's
+//!   value of the full history where the search agent acts in a solved subgame, else the equity
+//!   value (D-EVAL-2).
 
 use crate::belief::{action_likelihood, Beliefs};
-use crate::betting::{Action, BState, Next, Rules};
+use crate::betting::{Action, BState, Next, Rules, MAX_PLAYERS};
 use crate::blueprint::{Deal, SnapshotAverage, Storage, ThreadStats, Tree, MAX_A};
 use crate::buckets::CardAbstraction;
 use crate::config::AbstractionConfig;
-use crate::equity::combo_index;
+use crate::equity::{combo_index, COMBOS};
 use crate::eval_lut::{LHand, Lut};
 use crate::subgame::Subgame;
 use crate::vsolve::VectorSolver;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use cfr::rng::Rng;
 
 /// A trained blueprint: preflop average strategy, post-flop snapshot average (or current
@@ -148,12 +153,13 @@ impl BpTracker {
         }
     }
 
-    /// The blueprint's action for `hole` at real state `real` (board = cards dealt so far), and
-    /// the abstract action index it came from (None if the tracker is lost).
-    pub fn act(&self, bp: &Blueprint, real: &BState, hole: (u8, u8), board: &[u8], d: &mut Deal, rng: &mut Rng) -> (Action, Option<usize>) {
+    /// The blueprint's action for `hole` at real state `real` (board = cards dealt so far), the
+    /// abstract action index it came from (None if the tracker is lost), and the distribution
+    /// it was sampled from, over real actions (for AIVAT).
+    pub fn act(&self, bp: &Blueprint, real: &BState, hole: (u8, u8), board: &[u8], d: &mut Deal, rng: &mut Rng) -> (Action, Option<usize>, Vec<(Action, f64)>) {
         let p = real.to_act as usize;
         if self.lost || self.state.to_act != real.to_act || self.state.street != real.street {
-            return (Action::Call, None);
+            return (Action::Call, None, vec![(Action::Call, 1.0)]);
         }
         let nd = bp.tree.nodes[self.node as usize];
         let mut b5 = [0u8; 5];
@@ -170,13 +176,13 @@ impl BpTracker {
         let acts = bp.rules.actions(&self.state, bp.cfg);
         let k = rng.sample_index(&pr[..acts.len()]);
         let max_bet = *real.street_bet[..bp.rules.players].iter().max().unwrap();
-        let a = match acts[k] {
+        let real_of = |x: Action| match x {
             Action::Fold if max_bet > real.street_bet[p] => Action::Fold,
             Action::Fold | Action::Call => Action::Call,
             Action::RaiseTo(t) => {
                 let ai = all_in_to(&bp.rules, real);
                 if t == all_in_to(&bp.rules, &self.state) {
-                    return (Action::RaiseTo(ai), Some(k));
+                    return Action::RaiseTo(ai);
                 }
                 let f = pot_frac(&bp.rules, &self.state, t);
                 let to_call = max_bet - real.street_bet[p];
@@ -194,7 +200,18 @@ impl BpTracker {
                 }
             }
         };
-        (a, Some(k))
+        let tot: f64 = pr[..acts.len()].iter().sum();
+        let mut dist: Vec<(Action, f64)> = Vec::new();
+        for (j, &x) in acts.iter().enumerate() {
+            if pr[j] > 0.0 {
+                let r = real_of(x);
+                match dist.iter_mut().find(|e| e.0 == r) {
+                    Some(e) => e.1 += pr[j] / tot,
+                    None => dist.push((r, pr[j] / tot)),
+                }
+            }
+        }
+        (real_of(acts[k]), Some(k), dist)
     }
 }
 
@@ -205,6 +222,13 @@ pub trait Agent {
     fn observe(&mut self, before: &BState, a: Action, board: &[u8]);
     /// a new round starts with `board` (cards dealt so far) at state `s`
     fn new_round(&mut self, s: &BState, board: &[u8]);
+    /// the distribution the last `act` sampled from, over real actions
+    fn last_policy(&self) -> Vec<(Action, f64)>;
+    /// AIVAT ṽ: chips for seat 0 after each of `acts` at the last decision, both hands known
+    /// (None: the evaluator uses the equity value)
+    fn action_values(&mut self, _acts: &[Action], _holes: [(u8, u8); 2]) -> Option<Vec<f64>> {
+        None
+    }
 }
 
 pub struct BlueprintAgent<'a> {
@@ -215,19 +239,24 @@ pub struct BlueprintAgent<'a> {
     pub d: Deal,
     pub off_tree: u64,
     mine: Option<usize>,
+    last: Vec<(Action, f64)>,
 }
 
 impl<'a> BlueprintAgent<'a> {
     pub fn new(bp: &'a Blueprint<'a>, hole: (u8, u8), seed: u64) -> Self {
-        BlueprintAgent { bp, hole, tr: BpTracker::new(&bp.rules), rng: Rng::new(seed), d: Deal::new(), off_tree: 0, mine: None }
+        BlueprintAgent { bp, hole, tr: BpTracker::new(&bp.rules), rng: Rng::new(seed), d: Deal::new(), off_tree: 0, mine: None, last: Vec::new() }
     }
 }
 
 impl Agent for BlueprintAgent<'_> {
     fn act(&mut self, s: &BState, board: &[u8]) -> Action {
-        let (a, i) = self.tr.act(self.bp, s, self.hole, board, &mut self.d, &mut self.rng);
+        let (a, i, dist) = self.tr.act(self.bp, s, self.hole, board, &mut self.d, &mut self.rng);
         self.mine = i;
+        self.last = dist;
         a
+    }
+    fn last_policy(&self) -> Vec<(Action, f64)> {
+        self.last.clone()
     }
     fn observe(&mut self, before: &BState, a: Action, _board: &[u8]) {
         if let Some(i) = self.mine.take() {
@@ -252,8 +281,8 @@ pub struct SearchStats {
     pub searches: u64,
     pub re_searches: u64,
     pub zero_prob_events: u64,
-    /// exploitability (chips) of the played strategy within each river subgame, final / average
-    pub river_expl: Vec<(f64, f64)>,
+    /// exploitability (chips) within each river subgame: final, average, pot at the root
+    pub river_expl: Vec<(f64, f64, f64)>,
     pub search_secs: f64,
 }
 
@@ -282,6 +311,12 @@ pub struct SearchAgent<'a> {
     mine: Option<usize>,
     pub stats: SearchStats,
     pub measure_expl: bool,
+    /// record every subgame searched (`capture_line`), for offline experiments
+    pub capture: bool,
+    pub captured: Vec<String>,
+    last: Vec<(Action, f64)>,
+    /// subgame node of our last decision, when it came from the search
+    last_node: Option<u32>,
 }
 
 impl<'a> SearchAgent<'a> {
@@ -309,6 +344,10 @@ impl<'a> SearchAgent<'a> {
             mine: None,
             stats: SearchStats::default(),
             measure_expl: false,
+            capture: false,
+            captured: Vec::new(),
+            last: Vec::new(),
+            last_node: None,
         }
     }
 
@@ -340,12 +379,15 @@ impl<'a> SearchAgent<'a> {
         }
         s = self.solver.take().unwrap();
         s.frozen = fz.into_iter().collect();
+        if self.capture {
+            self.captured.push(capture_line(&root, &self.extra, &self.board, &s.ranges, &s.frozen));
+        }
         let iters = if self.board.len() == 4 { self.set.turn_iters } else { self.set.river_iters };
         s.run(iters);
         if self.measure_expl && self.board.len() == 5 {
             let e_fin = s.exploitability(false);
             let e_avg = s.exploitability(true);
-            self.stats.river_expl.push((e_fin, e_avg));
+            self.stats.river_expl.push((e_fin, e_avg, rules_pot(&root)));
         }
         self.solver = Some(s);
         self.stats.searches += 1;
@@ -365,8 +407,10 @@ impl<'a> SearchAgent<'a> {
 impl Agent for SearchAgent<'_> {
     fn act(&mut self, s: &BState, board: &[u8]) -> Action {
         if s.street < 2 || self.solver.is_none() {
-            let (a, i) = self.tr.act(self.bp, s, self.hole, board, &mut self.d, &mut self.rng);
+            let (a, i, dist) = self.tr.act(self.bp, s, self.hole, board, &mut self.d, &mut self.rng);
             self.mine = i;
+            self.last = dist;
+            self.last_node = None;
             return a;
         }
         let k = self.round.len();
@@ -376,8 +420,30 @@ impl Agent for SearchAgent<'_> {
         let avg = sol.strategy(node, &[], self.combo, true);
         let i = self.rng.sample_index(&play);
         let a = sol.g.action(node, i).unwrap();
+        let tot: f64 = play.iter().sum();
+        self.last = (0..play.len()).filter(|&j| play[j] > 0.0).map(|j| (sol.g.action(node, j).unwrap(), play[j] / tot)).collect();
+        self.last_node = Some(node);
         self.frozen.push((k, avg));
         a
+    }
+
+    fn last_policy(&self) -> Vec<(Action, f64)> {
+        self.last.clone()
+    }
+
+    fn action_values(&mut self, acts: &[Action], holes: [(u8, u8); 2]) -> Option<Vec<f64>> {
+        let node = self.last_node?;
+        let c = [combo_index(holes[0].0, holes[0].1), combo_index(holes[1].0, holes[1].1)];
+        let avg = self.set.play_average;
+        let s = self.solver.as_mut()?;
+        let n = s.g.nodes[node as usize].n as usize;
+        acts.iter()
+            .map(|&a| {
+                let i = (0..n).find(|&i| s.g.action(node, i) == Some(a))?;
+                let ch = s.g.child(node, i);
+                Some(s.pair_value(ch, &[], c, avg))
+            })
+            .collect()
     }
 
     fn observe(&mut self, before: &BState, a: Action, board: &[u8]) {
@@ -467,33 +533,43 @@ impl Agent for SearchAgent<'_> {
     }
 }
 
-/// Showdown value for `me` at contributions `total`, averaged over the remaining board cards.
-pub fn equity_value(holes: [(u8, u8); 2], board: &[u8], total: [u32; 2], me: usize) -> f64 {
+fn rules_pot(s: &BState) -> f64 {
+    s.total.iter().map(|&x| x as f64).sum()
+}
+
+/// (P(seat 0 wins), P(seat 0 loses)) over the remaining board cards, both hands known. The
+/// pre-flop case (1.7M boards) is cached per hand pair.
+pub fn win_lose(holes: [(u8, u8); 2], board: &[u8]) -> (f64, f64) {
+    static PRE: OnceLock<Mutex<HashMap<[u8; 4], (f64, f64)>>> = OnceLock::new();
+    let key = [holes[0].0, holes[0].1, holes[1].0, holes[1].1];
+    if board.is_empty() {
+        if let Some(&v) = PRE.get_or_init(Default::default).lock().unwrap().get(&key) {
+            return v;
+        }
+    }
     let lut = Lut::get();
-    let used: Vec<u8> = board.iter().copied().chain([holes[0].0, holes[0].1, holes[1].0, holes[1].1]).collect();
+    let used: Vec<u8> = board.iter().copied().chain(key).collect();
     let rest: Vec<u8> = (0..52u8).filter(|c| !used.contains(c)).collect();
     let need = 5 - board.len();
-    let (mut sum, mut n) = (0f64, 0u64);
+    let (mut w, mut l, mut n) = (0u64, 0u64, 0u64);
     let mut idx: Vec<usize> = (0..need).collect();
-    loop {
+    'outer: loop {
         let mut b = board.to_vec();
         b.extend(idx.iter().map(|&i| rest[i]));
         let bh = LHand::of(&b);
         let r0 = lut.class(bh.add(holes[0].0).add(holes[0].1));
         let r1 = lut.class(bh.add(holes[1].0).add(holes[1].1));
-        let o = 1 - me;
-        let (rm, ro) = if me == 0 { (r0, r1) } else { (r1, r0) };
-        sum += match rm.cmp(&ro) {
-            std::cmp::Ordering::Greater => total[o] as f64,
-            std::cmp::Ordering::Less => -(total[me] as f64),
-            std::cmp::Ordering::Equal => 0.0,
-        };
+        match r0.cmp(&r1) {
+            std::cmp::Ordering::Greater => w += 1,
+            std::cmp::Ordering::Less => l += 1,
+            std::cmp::Ordering::Equal => {}
+        }
         n += 1;
         // next combination of `need` indices out of rest.len()
         let mut k = need;
         loop {
             if k == 0 {
-                return sum / n as f64;
+                break 'outer;
             }
             k -= 1;
             if idx[k] < rest.len() - need + k {
@@ -504,17 +580,33 @@ pub fn equity_value(holes: [(u8, u8); 2], board: &[u8], total: [u32; 2], me: usi
                 break;
             }
         }
-        if need == 0 {
-            return sum / n as f64;
-        }
+    }
+    let v = (w as f64 / n as f64, l as f64 / n as f64);
+    if board.is_empty() {
+        PRE.get_or_init(Default::default).lock().unwrap().insert(key, v);
+    }
+    v
+}
+
+/// Showdown value for `me` at contributions `total`, averaged over the remaining board cards.
+pub fn equity_value(holes: [(u8, u8); 2], board: &[u8], total: [u32; 2], me: usize) -> f64 {
+    let (w, l) = win_lose(holes, board);
+    let v0 = w * total[1] as f64 - l * total[0] as f64;
+    if me == 0 {
+        v0
+    } else {
+        -v0
     }
 }
 
 pub struct HandResult {
     pub chips: [f64; 2],
-    /// AIVAT-style chance correction for each seat: Σ over dealt streets of
-    /// v(board after the deal) − v(board before), v = equity value at the contributions then
+    /// AIVAT chance terms for each seat: Σ over dealt streets of v(board after the deal) −
+    /// v(board before), v = equity value at the contributions then
     pub correction: [f64; 2],
+    /// AIVAT decision terms for each seat: Σ over both agents' decisions of
+    /// ṽ(action taken) − Σ_a π(a) ṽ(a)
+    pub dec_correction: [f64; 2],
     pub reached_turn: bool,
 }
 
@@ -523,20 +615,40 @@ pub fn play_hand(rules: &Rules, holes: [(u8, u8); 2], board: [u8; 5], agents: &m
     let mut s = rules.root();
     let mut shown = 0usize;
     let mut corr = [0f64; 2];
+    let mut dec0 = 0f64;
     let mut reached_turn = false;
-    let deal = |s: &BState, shown: &mut usize, corr: &mut [f64; 2], to: usize| {
-        let total = [s.total[0], s.total[1]];
-        for me in 0..2 {
-            let before = equity_value(holes, &board[..*shown], total, me);
-            let after = equity_value(holes, &board[..to], total, me);
-            corr[me] += after - before;
-        }
-        *shown = to;
+    // seat 0's equity value at `shown` board cards, (win, lose) cached per board length
+    let mut wl: [Option<(f64, f64)>; 6] = [None; 6];
+    let mut v0 = |shown: usize, total: [u32; MAX_PLAYERS]| {
+        let (w, l) = *wl[shown].get_or_insert_with(|| win_lose(holes, &board[..shown]));
+        // an outstanding (uncalled) bet counts as returned: both seats at the smaller contribution
+        (w - l) * total[0].min(total[1]) as f64
     };
     loop {
         let before = s;
         let p = s.to_act as usize;
         let a = agents[p].act(&s, &board[..shown]);
+        // AIVAT decision term (zero mean under the actor's own distribution)
+        let dist = agents[p].last_policy();
+        let acts: Vec<Action> = dist.iter().map(|e| e.0).collect();
+        let vals = match agents[p].action_values(&acts, holes) {
+            Some(v) => v,
+            None => acts
+                .iter()
+                .map(|&x| match rules.apply(&s, x) {
+                    Next::Terminal(n) if n.folded != 0 => {
+                        if n.folded & 1 != 0 {
+                            -(n.total[0] as f64)
+                        } else {
+                            n.total[1] as f64
+                        }
+                    }
+                    Next::Terminal(n) | Next::Decision(n) => v0(shown, n.total),
+                })
+                .collect(),
+        };
+        let taken = acts.iter().position(|&x| x == a).expect("the action taken is in the actor's distribution");
+        dec0 += vals[taken] - dist.iter().zip(&vals).map(|(e, v)| e.1 * v).sum::<f64>();
         for ag in agents.iter_mut() {
             ag.observe(&before, a, &board[..shown]);
         }
@@ -544,7 +656,10 @@ pub fn play_hand(rules: &Rules, holes: [(u8, u8); 2], board: [u8; 5], agents: &m
             Next::Decision(n) => {
                 if n.street != s.street {
                     let to = [0, 3, 4, 5][n.street as usize];
-                    deal(&n, &mut shown, &mut corr, to);
+                    let d = v0(to, n.total) - v0(shown, n.total);
+                    corr[0] += d;
+                    corr[1] -= d;
+                    shown = to;
                     reached_turn |= n.street >= 2;
                     for ag in agents.iter_mut() {
                         ag.new_round(&n, &board[..shown]);
@@ -564,21 +679,213 @@ pub fn play_hand(rules: &Rules, holes: [(u8, u8); 2], board: [u8; 5], agents: &m
                     while shown < 5 {
                         let to = if shown == 0 { 3 } else { shown + 1 };
                         reached_turn |= to >= 4;
-                        deal(&n, &mut shown, &mut corr, to);
+                        let d = v0(to, n.total) - v0(shown, n.total);
+                        corr[0] += d;
+                        corr[1] -= d;
+                        shown = to;
                     }
-                    for q in 0..2 {
-                        chips[q] = equity_value(holes, &board, [n.total[0], n.total[1]], q);
-                    }
+                    chips[0] = v0(5, n.total);
+                    chips[1] = -chips[0];
                 }
-                return HandResult { chips, correction: corr, reached_turn };
+                return HandResult { chips, correction: corr, dec_correction: [dec0, -dec0], reached_turn };
             }
         }
     }
 }
 
+/// One searched subgame as a text line (offline experiments: `iter_sweep`): board, added
+/// actions, frozen entries, root state, both belief ranges.
+pub fn capture_line(root: &BState, extra: &[(BState, Action)], board: &[u8], ranges: &[Vec<f64>; 2], frozen: &HashMap<(u32, u16), Vec<f64>>) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
+    let st = |o: &mut String, s: &BState| {
+        write!(o, " {} {} {} {} {} {} {}", s.street, s.to_act, s.folded, s.allin, s.need, s.raises, s.last_inc).unwrap();
+        for x in s.total.iter().chain(&s.street_bet) {
+            write!(o, " {x}").unwrap();
+        }
+    };
+    write!(o, "{}", board.len()).unwrap();
+    for c in board {
+        write!(o, " {c}").unwrap();
+    }
+    write!(o, " {}", extra.len()).unwrap();
+    for (s, a) in extra {
+        st(&mut o, s);
+        let (k, x) = match a {
+            Action::Fold => (0, 0),
+            Action::Call => (1, 0),
+            Action::RaiseTo(x) => (2, *x),
+        };
+        write!(o, " {k} {x}").unwrap();
+    }
+    let mut fz: Vec<_> = frozen.iter().collect();
+    fz.sort_by_key(|e| *e.0);
+    write!(o, " {}", fz.len()).unwrap();
+    for ((n, h), p) in fz {
+        write!(o, " {n} {h} {}", p.len()).unwrap();
+        for x in p {
+            write!(o, " {x}").unwrap();
+        }
+    }
+    st(&mut o, root);
+    for r in ranges {
+        for x in r {
+            write!(o, " {x}").unwrap();
+        }
+    }
+    o
+}
+
+/// A subgame read back from [`capture_line`].
+pub struct Captured {
+    pub root: BState,
+    pub extra: Vec<(BState, Action)>,
+    pub board: Vec<u8>,
+    pub ranges: [Vec<f64>; 2],
+    pub frozen: HashMap<(u32, u16), Vec<f64>>,
+}
+
+pub fn parse_capture(line: &str) -> Captured {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let mut i = 0usize;
+    let mut next = || {
+        i += 1;
+        toks[i - 1]
+    };
+    fn st<'a>(next: &mut impl FnMut() -> &'a str) -> BState {
+        let mut v = [0u32; 19];
+        for x in v.iter_mut() {
+            *x = next().parse().unwrap();
+        }
+        let mut total = [0u32; MAX_PLAYERS];
+        let mut street_bet = [0u32; MAX_PLAYERS];
+        total.copy_from_slice(&v[7..13]);
+        street_bet.copy_from_slice(&v[13..19]);
+        BState { street: v[0] as u8, to_act: v[1] as u8, folded: v[2] as u8, allin: v[3] as u8, need: v[4] as u8, raises: v[5] as u8, last_inc: v[6], total, street_bet }
+    }
+    let nb: usize = next().parse().unwrap();
+    let board: Vec<u8> = (0..nb).map(|_| next().parse().unwrap()).collect();
+    let nx: usize = next().parse().unwrap();
+    let mut extra = Vec::new();
+    for _ in 0..nx {
+        let s = st(&mut next);
+        let k: u32 = next().parse().unwrap();
+        let x: u32 = next().parse().unwrap();
+        extra.push((s, [Action::Fold, Action::Call, Action::RaiseTo(x)][k as usize]));
+    }
+    let nf: usize = next().parse().unwrap();
+    let mut frozen = HashMap::new();
+    for _ in 0..nf {
+        let n: u32 = next().parse().unwrap();
+        let h: u16 = next().parse().unwrap();
+        let k: usize = next().parse().unwrap();
+        frozen.insert((n, h), (0..k).map(|_| next().parse().unwrap()).collect());
+    }
+    let root = st(&mut next);
+    let r0: Vec<f64> = (0..COMBOS).map(|_| next().parse().unwrap()).collect();
+    let r1: Vec<f64> = (0..COMBOS).map(|_| next().parse().unwrap()).collect();
+    assert_eq!(i, toks.len(), "trailing tokens in capture line");
+    Captured { root, extra, board, ranges: [r0, r1], frozen }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixed-probability agent over the legal actions of a fold/call/pot/all-in menu.
+    struct RandomAgent {
+        cfg: AbstractionConfig,
+        rules: Rules,
+        rng: Rng,
+        last: Vec<(Action, f64)>,
+    }
+
+    impl Agent for RandomAgent {
+        fn act(&mut self, s: &BState, _board: &[u8]) -> Action {
+            let acts = self.rules.actions(s, &self.cfg);
+            let w: Vec<f64> = acts.iter().map(|a| match a { Action::Fold => 1.0, Action::Call => 3.0, Action::RaiseTo(_) => 1.5 }).collect();
+            let t: f64 = w.iter().sum();
+            self.last = acts.iter().zip(&w).map(|(&a, &x)| (a, x / t)).collect();
+            acts[self.rng.sample_index(&w)]
+        }
+        fn observe(&mut self, _: &BState, _: Action, _: &[u8]) {}
+        fn new_round(&mut self, _: &BState, _: &[u8]) {}
+        fn last_policy(&self) -> Vec<(Action, f64)> {
+            self.last.clone()
+        }
+    }
+
+    #[test]
+    fn aivat_terms_are_unbiased_and_reduce_variance() {
+        // toy agents with known action probabilities on real heads-up hands: the corrections
+        // must have mean 0 (within 4 s.e.) and the corrected results lower variance
+        let rules = Rules { players: 2, ..Rules::default() };
+        let cfg = AbstractionConfig::parse("allin = true
+preflop.0 = 1
+preflop.1+ = 1
+flop.0 = 1
+flop.1+ = 1
+turn.0 = 1
+turn.1+ = 1
+river.0 = 1
+river.1+ = 1").unwrap();
+        let mut rng = Rng::new(11);
+        // a few fixed match-ups (pre-flop equity is cached per pair), random boards
+        let pairs = [[(48u8, 49u8), (20u8, 1u8)], [(28, 25), (44, 41)], [(51, 47), (50, 46)], [(12, 13), (36, 32)]];
+        let n = 3000;
+        let (mut raw, mut chance, mut full) = (Vec::new(), Vec::new(), Vec::new());
+        let mut terms = Vec::new();
+        for k in 0..n {
+            let holes = pairs[k % pairs.len()];
+            let used = [holes[0].0, holes[0].1, holes[1].0, holes[1].1];
+            let mut deck: Vec<u8> = (0..52u8).filter(|c| !used.contains(c)).collect();
+            for i in 0..5 {
+                let j = i + (rng.next_u64() % (deck.len() - i) as u64) as usize;
+                deck.swap(i, j);
+            }
+            let board = [deck[0], deck[1], deck[2], deck[3], deck[4]];
+            let mut a0 = RandomAgent { cfg: cfg.clone(), rules, rng: Rng::new(rng.next_u64()), last: vec![] };
+            let mut a1 = RandomAgent { cfg: cfg.clone(), rules, rng: Rng::new(rng.next_u64()), last: vec![] };
+            let r = play_hand(&rules, holes, board, &mut [&mut a0, &mut a1]);
+            assert!((r.chips[0] + r.chips[1]).abs() < 1e-9 && (r.dec_correction[0] + r.dec_correction[1]).abs() < 1e-9);
+            raw.push(r.chips[0]);
+            chance.push(r.chips[0] - r.correction[0]);
+            full.push(r.chips[0] - r.correction[0] - r.dec_correction[0]);
+            terms.push(r.correction[0] + r.dec_correction[0]);
+        }
+        let ms = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            (m, v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64)
+        };
+        let (mt, vt) = ms(&terms);
+        let (mr, vr) = ms(&raw);
+        let (_, vc) = ms(&chance);
+        let (mf, vf) = ms(&full);
+        eprintln!("raw {mr:.1} (var {vr:.0}), chance-only var {vc:.0}, full {mf:.1} (var {vf:.0}); mean correction {mt:.2} ± {:.2}", (vt / n as f64).sqrt());
+        assert!(mt.abs() < 4.0 * (vt / n as f64).sqrt(), "corrections biased: {mt}");
+        assert!(vf < vc && vc < vr, "variance must fall: raw {vr}, chance {vc}, full {vf}");
+    }
+
+    #[test]
+    fn capture_lines_round_trip() {
+        let rules = Rules { players: 2, ..Rules::default() };
+        let mut root = rules.root();
+        root.street = 2;
+        root.total[0] = 400;
+        root.total[1] = 400;
+        let extra = vec![(root, Action::RaiseTo(350)), (root, Action::Call)];
+        let mut rng = Rng::new(5);
+        let ranges = [(0..COMBOS).map(|_| rng.next_f64()).collect::<Vec<f64>>(), (0..COMBOS).map(|_| rng.next_f64() * 1e-7).collect()];
+        let mut frozen = HashMap::new();
+        frozen.insert((7u32, 123u16), vec![0.1, 0.2, 0.7]);
+        let line = capture_line(&root, &extra, &[1, 2, 3, 4], &ranges, &frozen);
+        let c = parse_capture(&line);
+        assert_eq!(c.root, root);
+        assert_eq!(c.extra, extra);
+        assert_eq!(c.board, vec![1, 2, 3, 4]);
+        assert_eq!(c.ranges, ranges);
+        assert_eq!(c.frozen, frozen);
+    }
 
     #[test]
     fn equity_value_is_exact_on_simple_cases() {

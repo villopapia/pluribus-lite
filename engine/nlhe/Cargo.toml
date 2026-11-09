@@ -6,3 +6,7 @@ description = "6-max no-limit hold'em abstraction design tools (M2): betting rul
 
 [dependencies]
 cfr = { path = "../cfr" }   # for FxHashMap only
+
+[features]
+# f64 regret/average tables in the vector solver (default f32; D-SRCH-17 comparison)
+f64-tables = []
