@@ -1,4 +1,4 @@
-# Handoff (updated 2026-11-08 ~17:10)
+# Handoff (updated 2026-11-09 ~06:45)
 
 Read this first. Then read `CLAUDE.md` (rules), `docs/fidelity_spec.md` (published
 parameters), `docs/deviations.md` (every difference) and `docs/fidelity_report.md` (latest
@@ -10,7 +10,8 @@ deviation documented, justified and, where possible, measured.
 - Repository: Dell `C:\Users\User\pluribus-lite` (training), MSI
   `C:\Users\chris\Desktop\pluribus-lite` (development); branch `main`; `git log -1` shows the latest
   commit. Tags: `m0`, `m1-prelim`, `m1-prelim2`, `m2-design`.
-- Tests: 65 `cfr`, 87 `nlhe` unit, 5 `nlhe` config tests; 17 Python tests; all pass (2026-11-08, MSI).
+- Tests: 65 `cfr`, 99 `nlhe` unit, 5 `nlhe` config tests; 18 Python tests; all pass (2026-11-09, MSI).
+- NLHE heads-up head-to-head (search vs blueprint, 800 hands): +354 ± 351 mbb/hand (AIVAT-style), not significant; `docs/m4_validation.md`. History rewritten 2026-11-09 to drop AI trailers (`docs/commit_map.txt`); hook in `scripts/hooks`.
   `cd engine && cargo test --release` (cargo at `~/.cargo/bin`, not on PATH) and
   `cd analysis && .venv/Scripts/python -m pytest -q tests`.
 - Not in git, kept locally: `docs/papers/*.pdf` and `docs/sources/*.md` (third-party texts; index with SHA-256 in `docs/sources_review.md`);

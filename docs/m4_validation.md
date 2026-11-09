@@ -145,3 +145,53 @@ settings the 4-continuation agents and E win head-to-head (+0.004 to +0.17) whil
 blueprint-leaf agents lose. Open items: D-SRCH-6 (compression),
 D-SRCH-11 (final iteration) now carry Leduc measurements; their NLHE effect needs NLHE evaluation
 (head-to-head and AIVAT, `docs/eval_plan.md`).
+
+## NLHE heads-up head-to-head (replaces criterion (a); 2026-11-09)
+
+**Question:** does Algorithm 2 search on the turn and river beat the blueprint it starts from, in
+a game with large chance branching (heads-up NLHE)?
+
+**Setup**
+- Blueprint `hu_dev`: `nlhe/configs/hu_dev.cfg` (config v2, 2 players, buckets 169/63/63/63 on
+  the j63 abstraction, river on the fly), 8,016 decision nodes; trained 90 min on the MSI,
+  12 threads, 1.68·10⁹ MCCFR iterations, 54 post-flop snapshots; checkpoint
+  `data/runs/hu_dev/ckpt_001681410525.bin`.
+- Blueprint agent: blueprint policy on all streets (pre-flop average; post-flop snapshot
+  average), off-tree opponent actions by randomised pseudo-harmonic translation (D-SRCH-16).
+- Search agent: blueprint pre-flop and flop; on the turn and river, Algorithm 2 with
+  `search_root.cfg` / `search_later.cfg` (D-SRCH-3, pot_bet_hu), Bayes-updated beliefs over
+  1,326 hands, lossless heads-up subgames with exact enumeration of the river (D-SRCH-15),
+  vector Linear CFR (`vsolve`); **turn 150 / river 400 iterations; plays the final iteration**
+  (paper, D-SRCH-11); off-tree opponent actions added to the tree and re-searched.
+- Match: `hu_match --deals 400 --threads 12 --turn-iters 150 --river-iters 400 --seed 1
+  --measure-expl`; each deal (both hands and the full board) played twice with seats swapped
+  (duplicate); 1 bb = 100 chips, 100 bb stacks.
+- Variance reduction: AIVAT-style chance correction (equity value function at every flop,
+  turn and river deal; actions not corrected, D-EVAL-2). Standard errors are over the
+  400 deals (duplicate pairs).
+
+**Result** (800 hands, 400 duplicate deals, 235 deals reached the turn; 48.7 min)
+
+| estimator | search − blueprint, mbb/hand | s.e. | 95% CI |
+|---|---:|---:|---|
+| **AIVAT-style (chance)** | **+353.9** | **351.0** | **[−334, +1,042]** |
+| raw | +390.6 | 395.8 | [−385, +1,166] |
+
+- **Not significant:** the CI contains 0. The chance-only correction cut the variance by only
+  ×1.27: most of the remaining variance comes from the agents' own sampled actions, which
+  this estimator does not correct.
+- Separating ±100 mbb/hand at 2 s.e. needs s.e. ≈ 50, i.e. ≈ 39,000 hands (~40 h at this speed);
+  ±200 mbb/hand needs ≈ 10,000 hands (~10 h).
+- Search statistics: 697 searches (56 re-searches after off-tree opponent actions), 49 s per
+  search on average with 12 concurrent searches; 0 zero-probability observations; the
+  blueprint agent translated 94 off-tree actions.
+- **Secondary, exploitability within the river subgames** (256 searches, chips; best response
+  inside the subgame against the solved beliefs): **final iteration 124.6, average 4.4.** The
+  strategy actually played (final iteration, D-SRCH-11) is ~28× more exploitable than the
+  average at 400 iterations. A `--play-average` match isolates this effect.
+
+**Engineering note:** the first calibration ran ~50× slower than expected. The cause was
+memory, not compute: a heads-up turn subgame holds ~9k (node, river) blocks of regrets and
+average sums, ~570 MB in f64, so 20 concurrent solvers paged on 16 GB. Fixed in `b052959`
+(f32 tables, pooled buffers, 12 threads): 12 concurrent turn solves now take 2.1× the
+single-solve time.
