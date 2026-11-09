@@ -37,7 +37,7 @@ the same deals (seed 2): final-iteration play (faithful) and `--play-average` (a
 deals each. One ≤ 2 h chunk per call, resumable, BelowNormal:
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\hu_long.ps1 -Arm final`
 (or `-Arm average`). Output `data\hu_long\{final,average}.{tsv,log}`; paired report:
-`analysis.venvScriptspython analysishu_pair.py datahu_longinal.tsv datahu_longverage.tsv`.
+`analysis\.venv\Scripts\python analysis\hu_pair.py data\hu_long\final.tsv data\hu_long\average.tsv`.
 ~28–34 s per deal at 12 threads (≈ 29 h per arm). Pre-flight chunks done: 70 / 65 deals.
 
 | what | PID | details |
