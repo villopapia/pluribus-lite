@@ -12,7 +12,8 @@
 //! `--out` are skipped; `--max-secs` stops starting new subgames (≤ 2 h chunks). `--dump` writes
 //! the root strategies (average and final, every hand) at the first level, for the f32/f64
 //! comparison (build with `--features f64-tables`). The solver samples one board per iteration
-//! (the paper); `--enumerate` enumerates chance (the first sweep).
+//! (the paper); `--enumerate` enumerates chance (the first sweep); `--boards-per-iter k` samples
+//! k boards per iteration.
 
 use nlhe::betting::Rules;
 use nlhe::config::AbstractionConfig;
@@ -89,6 +90,7 @@ fn main() {
     let max_secs: f64 = get("--max-secs", "1e18").parse().unwrap();
     let dump = args.iter().position(|a| a == "--dump").map(|i| PathBuf::from(&args[i + 1]));
     let enumerate = args.iter().any(|a| a == "--enumerate");
+    let k: usize = get("--boards-per-iter", "1").parse().unwrap();
     let rules = Rules { players: 2, ..Rules::default() };
     let t0 = Instant::now();
 
@@ -125,7 +127,7 @@ fn main() {
         .chain(river.iter().map(|(id, l)| ("river", id, *l, &river_levels)))
         .filter(|(_, id, _, lv)| !done.contains(&((*id).clone(), *lv.last().unwrap())))
         .collect();
-    println!("{} turn + {} river subgames selected, {} to solve; levels river {river_levels:?}, turn {turn_levels:?}; threads {threads}; chance {}", turn.len(), river.len(), jobs.len(), if enumerate { "enumerated" } else { "sampled" });
+    println!("{} turn + {} river subgames selected, {} to solve; levels river {river_levels:?}, turn {turn_levels:?}; threads {threads}; chance {}", turn.len(), river.len(), jobs.len(), if enumerate { "enumerated".to_string() } else { format!("sampled, {k} board(s) per iteration") });
     let out = Mutex::new(std::fs::OpenOptions::new().append(true).open(&out_path).expect("open out"));
     let dump_f = dump.map(|p| Mutex::new(std::fs::File::create(p).expect("dump file")));
     let next = AtomicUsize::new(0);
@@ -143,7 +145,7 @@ fn main() {
                 if !enumerate {
                     // boards fixed per subgame: seed from the id
                     let seed = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
-                    s = s.with_sampling(seed);
+                    s = s.with_sampling(seed).with_boards_per_iter(k);
                 }
                 s.frozen = c.frozen;
                 let pot: f64 = c.root.total.iter().map(|&x| x as f64).sum();

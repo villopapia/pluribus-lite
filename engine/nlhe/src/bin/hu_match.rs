@@ -4,7 +4,8 @@
 //! `hu_match --run-dir ../data/runs/hu_dev --config nlhe/configs/hu_dev.cfg
 //!   --abstraction-dir ../data/abstraction/j63 --buckets 63 [--deals 400] [--threads 12]
 //!   [--turn-iters 150] [--river-iters 400] [--seed 1] [--play-average] [--measure-expl]
-//!   [--out ../data/hu_match.tsv] [--max-secs 6600] [--capture ../data/subgames.txt] [--enumerate]`
+//!   [--out ../data/hu_match.tsv] [--max-secs 6600] [--capture ../data/subgames.txt] [--enumerate]
+//!   [--boards-per-iter 1]`
 //!
 //! The search solver samples one board per iteration (the paper); `--enumerate` enumerates
 //! chance instead (the solver of the first 800-hand run).
@@ -64,6 +65,7 @@ fn main() {
         river_iters: get("--river-iters", "400").parse().unwrap(),
         play_average: flag("--play-average"),
         enumerate: flag("--enumerate"),
+        boards_per_iter: get("--boards-per-iter", "1").parse().unwrap(),
     };
     let measure = flag("--measure-expl");
 
@@ -95,7 +97,7 @@ fn main() {
         "search: turn {} / river {} iterations, chance {}, plays {}; deals {deals} (x2 seats), threads {threads}, seed {seed}; out {}",
         set.turn_iters,
         set.river_iters,
-        if set.enumerate { "enumerated" } else { "sampled, one board per iteration" },
+        if set.enumerate { "enumerated".to_string() } else { format!("sampled, {} board(s) per iteration", set.boards_per_iter) },
         if set.play_average { "the average (ablation)" } else { "the final iteration (paper)" },
         out_path.display()
     );

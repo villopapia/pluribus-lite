@@ -62,8 +62,13 @@ pub struct VectorSolver {
     /// public chance sampling (Supp p. 22, [42]): one board per iteration in CFR passes;
     /// None = enumerate every card (best-response and expected-value passes always enumerate)
     sampler: Option<cfr::rng::Rng>,
-    /// this iteration's sampled cards after the root board
+    /// the sampled cards after the root board of the board being walked
     sampled: Vec<u8>,
+    /// boards sampled per iteration (k); for k > 1 the k walks of a traverser's pass share the
+    /// strategy at the start of the pass and their regret updates are summed into `pending`,
+    /// applied after the pass (Pluribus: one board per thread, Supp p. 22)
+    boards: usize,
+    pending: HashMap<u64, Vec<Acc>>,
     /// normaliser: total weight of card-compatible hand pairs at the root
     pub z: f64,
     pub iterations: u64,
@@ -87,7 +92,7 @@ impl VectorSolver {
                 }
             }
         }
-        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), pool: Vec::new(), sampler: None, sampled: Vec::new(), z: 1.0, iterations: 0 };
+        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), pool: Vec::new(), sampler: None, sampled: Vec::new(), boards: 1, pending: HashMap::new(), z: 1.0, iterations: 0 };
         let mut c = vec![0f64; COMBOS];
         s.compat_into(&s.ranges[1], 1.0, &mut c);
         s.z = c.iter().zip(&s.ranges[0]).map(|(c, r)| c * r).sum();
@@ -337,12 +342,14 @@ impl VectorSolver {
                     if let Mode::Cfr(t) = mode {
                         let frozen: Vec<u16> = self.frozen.keys().filter(|(nd2, _)| *nd2 == node).map(|&(_, h)| h).collect();
                         let blk = self.blocks.entry(key).or_insert_with(|| Block { reg: vec![0.0; COMBOS * n], sum: vec![0.0; COMBOS * n] });
+                        // k > 1: regret deltas wait in `pending` so the pass's strategy stays fixed
+                        let reg = if self.boards > 1 { self.pending.entry(key).or_insert_with(|| vec![0.0; COMBOS * n]) } else { &mut blk.reg };
                         for h in 0..COMBOS {
                             if reach[i][h] == 0.0 && v[h] == 0.0 || frozen.contains(&(h as u16)) {
                                 continue;
                             }
                             for a in 0..n {
-                                blk.reg[h * n + a] += (t * (va[a][h] - v[h])) as Acc;
+                                reg[h * n + a] += (t * (va[a][h] - v[h])) as Acc;
                                 blk.sum[h * n + a] += (t * reach[i][h] * sig[h * n + a]) as Acc;
                             }
                         }
@@ -378,6 +385,15 @@ impl VectorSolver {
         self
     }
 
+    /// Sample `k` boards per iteration (with sampling on): each traverser walks all k with the
+    /// strategy fixed at the start of its pass, and their regret updates are summed. k = 1 is
+    /// [`with_sampling`](Self::with_sampling) exactly.
+    pub fn with_boards_per_iter(mut self, k: usize) -> Self {
+        assert!(k >= 1);
+        self.boards = k;
+        self
+    }
+
     /// Run `iters` more iterations of Linear CFR (iteration t's regrets and average-strategy
     /// contributions weighted by t [38]).
     pub fn run(&mut self, iters: u64) {
@@ -385,21 +401,36 @@ impl VectorSolver {
         for _ in 0..iters {
             self.iterations += 1;
             let t = self.iterations as f64;
+            // k boards per iteration, shared by both traversers (none when enumerating)
+            let mut boards: Vec<Vec<u8>> = Vec::new();
             if let Some(rng) = self.sampler.as_mut() {
-                // one board per iteration, shared by both traversers
                 let bm = mask(&self.board);
-                let mut deck: Vec<u8> = (0..52u8).filter(|&c| bm & (1 << c) == 0).collect();
-                self.sampled.clear();
-                for k in 0..5 - self.board.len() {
-                    let j = k + (rng.next_u64() % (deck.len() - k) as u64) as usize;
-                    deck.swap(k, j);
-                    self.sampled.push(deck[k]);
+                for _ in 0..self.boards {
+                    let mut deck: Vec<u8> = (0..52u8).filter(|&c| bm & (1 << c) == 0).collect();
+                    let mut cards = Vec::new();
+                    for k in 0..5 - self.board.len() {
+                        let j = k + (rng.next_u64() % (deck.len() - k) as u64) as usize;
+                        deck.swap(k, j);
+                        cards.push(deck[k]);
+                    }
+                    boards.push(cards);
                 }
             }
             for i in 0..2 {
-                let mut b = self.board.clone();
-                let v = self.walk(0, &mut b, &reach, i, Mode::Cfr(t));
-                self.pool.push(v);
+                for k in 0..boards.len().max(1) {
+                    if let Some(c) = boards.get(k) {
+                        self.sampled.clone_from(c);
+                    }
+                    let mut b = self.board.clone();
+                    let v = self.walk(0, &mut b, &reach, i, Mode::Cfr(t));
+                    self.pool.push(v);
+                }
+                for (key, d) in self.pending.drain() {
+                    let reg = &mut self.blocks.get_mut(&key).expect("pending regrets of a visited block").reg;
+                    for (r, x) in reg.iter_mut().zip(d) {
+                        *r += x;
+                    }
+                }
             }
         }
     }
@@ -603,7 +634,10 @@ river.1+ = 1").unwrap();
         let build = || Subgame::build(&rules, &cfg, round_start(&rules, 2, t, 0));
         let mut en = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]);
         let mut sa = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]).with_sampling(7);
+        let mut s4 = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]).with_sampling(8).with_boards_per_iter(4);
         en.run(100);
+        s4.run(100 * 11);
+        let e4 = s4.exploitability(true);
         let t0 = std::time::Instant::now();
         sa.run(100 * 44);
         let (ee, es) = (en.exploitability(true), sa.exploitability(true));
@@ -616,6 +650,10 @@ river.1+ = 1").unwrap();
         eprintln!("uniform {start:.2}, enumerating {ee:.3}, sampling {es:.3} chips (pot 800, sampling {:.1}s); root strategy distance {d:.4}", t0.elapsed().as_secs_f64());
         assert!(ee < start / 20.0 && es < start / 10.0, "{start} -> {ee} / {es}");
         assert!(d < 0.05, "average strategies differ: {d}");
+        let c = s4.strategy_all(0, &[], true);
+        let d4: f64 = (0..COMBOS).map(|h| r[h] * (0..n).map(|k| (a[h * n + k] - c[h * n + k]).abs()).sum::<f64>()).sum::<f64>() / tot / 2.0;
+        eprintln!("4 boards per iteration (1,100 iterations): {e4:.3} chips; root strategy distance to enumeration {d4:.4}");
+        assert!(e4 < start / 10.0 && d4 < 0.05, "k = 4: {e4}, {d4}");
     }
 
     #[test]

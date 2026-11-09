@@ -276,6 +276,8 @@ pub struct SearchSettings {
     pub play_average: bool,
     /// enumerate chance in the solver instead of sampling one board per iteration (the paper)
     pub enumerate: bool,
+    /// boards sampled per iteration when sampling (Pluribus: one per thread)
+    pub boards_per_iter: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -372,7 +374,7 @@ impl<'a> SearchAgent<'a> {
         let ranges = self.beliefs.as_ref().unwrap().ranges.clone();
         let mut s = VectorSolver::new(g, self.bp.rules, &self.board, [ranges[0].clone(), ranges[1].clone()]);
         if !self.set.enumerate {
-            s = s.with_sampling(self.rng.next_u64());
+            s = s.with_sampling(self.rng.next_u64()).with_boards_per_iter(self.set.boards_per_iter);
         }
         self.solver = Some(s);
         // frozen: our earlier decisions this round, at their nodes in the new subgame

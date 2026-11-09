@@ -183,12 +183,38 @@ fn checkpoints(dir: &Path) -> Vec<(u64, PathBuf)> {
 }
 
 struct Logger {
-    file: std::fs::File,
+    path: std::path::PathBuf,
     pre_s: Vec<(u32, u32)>,
     post_s: Vec<(u32, u32)>,
     prev_pre: Vec<f32>,
     prev_post: Vec<f32>,
     last: Instant,
+}
+
+impl Logger {
+    /// Append one line, opening and closing the file each time (one row per --log-seconds),
+    /// like progress.tsv. A handle held for the whole run keeps writing to the original file
+    /// if anything renames, moves or replaces metrics.tsv meanwhile (Rust opens with
+    /// delete-sharing), so the visible metrics.tsv can freeze while training continues (the
+    /// Dell, 2026-11-09).
+    fn append(&self, line: &str) {
+        append_line(&self.path, line);
+    }
+}
+
+/// Never fatal: if another program holds the file locked (e.g. open in Excel), the row is
+/// skipped with a warning; every metrics row is also printed to stdout (train.log).
+fn append_line(path: &std::path::Path, line: &str) {
+    let r = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = r {
+        println!("warning: could not append to {}: {e}", path.display());
+    }
+}
+
+/// First line of a metrics file without a UTF-8 BOM (an editor or PowerShell may add one; it
+/// must not count as a different column set).
+fn first_line(text: &str) -> Option<&str> {
+    text.lines().next().map(|l| l.trim_start_matches('\u{feff}'))
 }
 
 fn main() {
@@ -320,17 +346,19 @@ schedule: {s:?}
     const HEADER: &str = "wall_s\ttrain_min\titeration\tit_per_s\tnodes_per_it\tns_per_node\triver_reach\triver_share\tpruned_per_it\tpos_regret_per_infoset_pre\tpos_regret_per_infoset_flop\tpos_regret_per_infoset_turn\tpos_regret_per_infoset_river\ttouched_frac_pre\ttouched_frac_flop\ttouched_frac_turn\ttouched_frac_river\tstrat_change_pre_avg\tstrat_change_post_cur\tsaturated\tfloored\tsnapshots\talloc_gib\talloc_frac_of_dense\tseq_reached\tseq_reached_frac\tphase	pruned_rate";
     // a metrics file with an older column set is kept aside, not appended to
     if let Ok(old) = std::fs::read_to_string(&metrics_path) {
-        if old.lines().next() != Some(HEADER) {
+        if first_line(&old) != Some(HEADER) {
             let mut k = 1;
             while a.run_dir.join(format!("metrics_v{k}.tsv")).exists() {
                 k += 1;
             }
-            std::fs::rename(&metrics_path, a.run_dir.join(format!("metrics_v{k}.tsv"))).expect("rotate metrics");
+            let to = a.run_dir.join(format!("metrics_v{k}.tsv"));
+            std::fs::rename(&metrics_path, &to).expect("rotate metrics");
+            println!("metrics.tsv has another column set: moved to {}, starting a new metrics.tsv", to.display());
         }
     }
     let new_file = !metrics_path.exists();
     let mut lg = Logger {
-        file: std::fs::OpenOptions::new().create(true).append(true).open(&metrics_path).unwrap(),
+        path: metrics_path.clone(),
         pre_s: sample_infosets(&tree, 50_000, 77, true),
         post_s: sample_infosets(&tree, 50_000, 78, false),
         prev_pre: Vec::new(),
@@ -340,7 +368,7 @@ schedule: {s:?}
     lg.prev_pre = policy_snapshot(&tree, &st, &lg.pre_s);
     lg.prev_post = policy_snapshot(&tree, &st, &lg.post_s);
     if new_file {
-        writeln!(lg.file, "{HEADER}").unwrap();
+        lg.append(HEADER);
     }
 
     let wall0 = Instant::now();
@@ -527,8 +555,7 @@ schedule: {s:?}
             // share of traverser actions skipped by pruning, in pruning iterations
             row += &format!("	{:.5}", interval.pruned_actions as f64 / interval.prune_considered.max(1) as f64);
             println!("{row}");
-            writeln!(lg.file, "{row}").unwrap();
-            lg.file.flush().unwrap();
+            lg.append(&row);
             interval = ThreadStats::default();
             lg.last = Instant::now();
         }
@@ -536,5 +563,32 @@ schedule: {s:?}
             println!("stopping at iteration {t} ({})", if stop_req { "stop file" } else if plan_done { "planned iterations done" } else { "time budget" });
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_header_check_ignores_a_bom() {
+        assert_eq!(first_line("\u{feff}wall_s\tx\n1\t2\n"), Some("wall_s\tx"));
+        assert_eq!(first_line("wall_s\tx\r\n1\t2\r\n"), Some("wall_s\tx"));
+        assert_eq!(first_line(""), None);
+    }
+
+    #[test]
+    fn metrics_lines_append_across_reopenings() {
+        // a resumed trainer appends to the same file (each line opens and closes it)
+        let p = std::env::temp_dir().join(format!("pluribus_lite_metrics_test_{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        append_line(&p, "header");
+        append_line(&p, "row 1");
+        append_line(&p, "row 2");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "header\nrow 1\nrow 2\n");
+        // the size seen by a directory listing matches the content
+        let listed = std::fs::read_dir(p.parent().unwrap()).unwrap().flatten().find(|e| e.path() == p).unwrap();
+        assert_eq!(listed.metadata().unwrap().len(), "header\nrow 1\nrow 2\n".len() as u64);
+        std::fs::remove_file(&p).unwrap();
     }
 }
