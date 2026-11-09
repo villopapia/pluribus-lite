@@ -300,3 +300,21 @@ carries the noise of the one river sampled in the last iteration, and each river
 updated on ~1/48 of the iterations. The plateau is reached by ~25,600 sampled iterations
 (~320 core-s per search, inside Pluribus's 28–924). **Long-run settings: turn 25,600 / river
 6,400 iterations, sampling (faithful).**
+
+### Follow-up 4 (2026-11-09): boards per iteration (k), equal compute
+
+Pluribus's vector solver "samples one set of public board cards per thread" (Supp p. 22); on 28
+cores that is ~28 boards per iteration on shared regrets. `vsolve::with_boards_per_iter(k)`
+samples k boards per iteration, keeps the strategy fixed within a traverser's pass and sums the
+k regret updates (k = 1 is the previous solver, bit for bit; unit test at k = 4: average within
+2.7% of the enumerating solver's at the root). Same 100 turn subgames, about equal compute:
+
+| k | iterations (≈ core-s per search) | final, % pot | average, % pot |
+|---|---|---:|---:|
+| 1 | 6,400 (80) / 25,600 (318) | 31.4 / 23.1 | 2.87 / 0.63 |
+| 4 | 400 (18) / 1,600 (71) / 6,400 (275) | 58.4 / 33.3 / 24.1 | 15.4 / 3.03 / 0.66 |
+| 28 | 57 (16) / 229 (64) / 914 (250) | 68.0 / 42.0 / 24.5 | 20.6 / 4.71 / 1.00 |
+
+**k does not change the final iteration's plateau** (23–25% of the pot at ~250–320 core-s);
+at equal compute the average converges fastest with k = 1 (more Linear CFR iterations). The
+long run keeps k = 1, turn 25,600 / river 6,400 (and the pre-flight deals).

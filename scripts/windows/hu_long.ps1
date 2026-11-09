@@ -17,6 +17,7 @@ param(
     [int]$Deals = 3400,
     [int]$TurnIters = 25600,
     [int]$RiverIters = 6400,
+    [int]$BoardsPerIter = 1,
     [int]$Seed = 2,
     [int]$Threads = 12,
     [int]$MaxSecs = 5400,
@@ -36,7 +37,7 @@ if ($UpdateBinary -or -not (Test-Path $exe)) {
 if (Get-Process hu_match -ErrorAction SilentlyContinue) { throw 'hu_match is already running' }
 (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
 
-$hmArgs = @('--deals', $Deals, '--seed', $Seed, '--turn-iters', $TurnIters, '--river-iters', $RiverIters,
+$hmArgs = @('--deals', $Deals, '--seed', $Seed, '--turn-iters', $TurnIters, '--river-iters', $RiverIters, '--boards-per-iter', $BoardsPerIter,
             '--threads', $Threads, '--max-secs', $MaxSecs, '--measure-expl', '--out', (Join-Path $dir "$Arm.tsv"))
 if ($Arm -eq 'average') { $hmArgs += '--play-average' }
 $log = Join-Path $dir "$Arm.log"
