@@ -7,7 +7,7 @@
 #
 # * BelowNormal priority (set on this process; hu_match inherits it).
 # * Resumable: hu_match skips the deals already in data\hu_long\<arm>.tsv; it stops taking new
-#   deals after -MaxSecs (default 6000 s), so a chunk ends within ~2 h. Run it again to continue.
+#   deals after -MaxSecs (default 5400 s; deals in progress then finish, up to ~700 s more), so a chunk ends within ~2 h. Run it again to continue.
 # * Runs a private copy of the binary (data\hu_long\bin), so rebuilding never touches a running
 #   exe. -UpdateBinary refreshes it from engine\target\release (build that first).
 # * Output appended to data\hu_long\<arm>.log; summary of both arms (paired):
@@ -19,7 +19,7 @@ param(
     [int]$RiverIters = 6400,
     [int]$Seed = 2,
     [int]$Threads = 12,
-    [int]$MaxSecs = 6000,
+    [int]$MaxSecs = 5400,
     [switch]$UpdateBinary
 )
 

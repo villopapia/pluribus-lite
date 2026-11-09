@@ -31,6 +31,15 @@ deviation documented, justified and, where possible, measured.
 
 ## 2. Running background processes
 
+**M4 NLHE long run (MSI, started 2026-11-09, run by the user overnight in chunks).** Two arms on
+the same deals (seed 2): final-iteration play (faithful) and `--play-average` (ablation); turn
+25,600 / river 6,400 sampled iterations (the sweep's plateau, `docs/m4_validation.md`), 3,400
+deals each. One ≤ 2 h chunk per call, resumable, BelowNormal:
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\hu_long.ps1 -Arm final`
+(or `-Arm average`). Output `data\hu_long\{final,average}.{tsv,log}`; paired report:
+`analysis\.venv\Scripts\python analysis\hu_pair.py data\hu_longinal.tsv data\hu_longverage.tsv`.
+~28–34 s per deal at 12 threads (≈ 29 h per arm). Pre-flight chunks done: 70 / 65 deals.
+
 | what | PID | details |
 |---|---|---|
 | **Dell long run, pilot only** (`train_blueprint`, `pilot_dell_fit11.cfg`, `j63` with 25 restarts) | **33564** (cmd 9480), started by the scheduled task, so detached from any Claude session | started **fresh** 2026-11-08 17:04:51 (pid 6984); watchdog stop 19:05 at iteration 404,311,320; **resumed 20:38:06** from `ckpt_000404311320.bin`; BelowNormal, 12 threads, **planned 83,518,000,000 iterations** (explicit, D-SCHED-2; ≈ 16 days at 60,415 it/s), river on the fly, checkpoint every 120 min, keep 2 |
