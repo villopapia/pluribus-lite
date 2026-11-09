@@ -274,6 +274,8 @@ pub struct SearchSettings {
     pub river_iters: u64,
     /// play the weighted average instead of the final iteration (diagnostic, not the paper)
     pub play_average: bool,
+    /// enumerate chance in the solver instead of sampling one board per iteration (the paper)
+    pub enumerate: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -369,6 +371,9 @@ impl<'a> SearchAgent<'a> {
         let g = Subgame::build_extra(&self.bp.rules, self.root_cfg, self.later_cfg, root, self.extra.clone());
         let ranges = self.beliefs.as_ref().unwrap().ranges.clone();
         let mut s = VectorSolver::new(g, self.bp.rules, &self.board, [ranges[0].clone(), ranges[1].clone()]);
+        if !self.set.enumerate {
+            s = s.with_sampling(self.rng.next_u64());
+        }
         self.solver = Some(s);
         // frozen: our earlier decisions this round, at their nodes in the new subgame
         let mut fz = Vec::new();

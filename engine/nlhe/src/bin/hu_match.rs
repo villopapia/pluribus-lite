@@ -4,7 +4,10 @@
 //! `hu_match --run-dir ../data/runs/hu_dev --config nlhe/configs/hu_dev.cfg
 //!   --abstraction-dir ../data/abstraction/j63 --buckets 63 [--deals 400] [--threads 12]
 //!   [--turn-iters 150] [--river-iters 400] [--seed 1] [--play-average] [--measure-expl]
-//!   [--out ../data/hu_match.tsv] [--max-secs 6600] [--capture ../data/subgames.txt]`
+//!   [--out ../data/hu_match.tsv] [--max-secs 6600] [--capture ../data/subgames.txt] [--enumerate]`
+//!
+//! The search solver samples one board per iteration (the paper); `--enumerate` enumerates
+//! chance instead (the solver of the first 800-hand run).
 //!
 //! Each deal (two hands, five board cards) is played twice with the seats swapped (duplicate).
 //! One TSV row per finished deal goes to `--out`; a rerun with the same `--out` skips finished
@@ -60,6 +63,7 @@ fn main() {
         turn_iters: get("--turn-iters", "150").parse().unwrap(),
         river_iters: get("--river-iters", "400").parse().unwrap(),
         play_average: flag("--play-average"),
+        enumerate: flag("--enumerate"),
     };
     let measure = flag("--measure-expl");
 
@@ -88,9 +92,10 @@ fn main() {
     );
     let bp = Blueprint { tree: &tree, st: &st, snap: snap.as_ref(), abs: &abs, cfg: &cfg, rules };
     println!(
-        "search: turn {} / river {} iterations, plays {}; deals {deals} (x2 seats), threads {threads}, seed {seed}; out {}",
+        "search: turn {} / river {} iterations, chance {}, plays {}; deals {deals} (x2 seats), threads {threads}, seed {seed}; out {}",
         set.turn_iters,
         set.river_iters,
+        if set.enumerate { "enumerated" } else { "sampled, one board per iteration" },
         if set.play_average { "the average (ablation)" } else { "the final iteration (paper)" },
         out_path.display()
     );

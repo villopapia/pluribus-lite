@@ -4,9 +4,11 @@
 //! * One pass per traverser over the subgame's public tree with a reach vector over the 1,326
 //!   hands per player; counterfactual values per hand come back up. Lossless: an infoset is
 //!   (node, board, hand) on every street of the subgame (D-SRCH-15).
-//! * Chance (a street change inside the subgame, or an all-in run-out) enumerates every card
-//!   (exact; heads-up turn subgames have 44 rivers), instead of one sampled board per thread
-//!   (D-SRCH-12).
+//! * Chance (a street change inside the subgame, or an all-in run-out): CFR iterations either
+//!   sample one board per iteration (`with_sampling`, public chance sampling as Pluribus's
+//!   vector solver does, Supp p. 22 [42]; one search runs on one thread, D-SRCH-12) or enumerate
+//!   every card (exact; heads-up turn subgames have 44 rivers). Best-response and
+//!   expected-value passes always enumerate.
 //! * Terminals in O(n): folds from total and per-card opponent reach (card removal by
 //!   inclusion–exclusion); showdowns by a sweep over hands sorted by strength.
 //! * Linear CFR: iteration t's regrets and average-strategy contributions weighted by t [38].
@@ -57,6 +59,11 @@ pub struct VectorSolver {
     blocks: HashMap<u64, Block>,
     ranks: HashMap<u64, (Vec<u16>, Vec<u16>)>,
     pool: Vec<Vec<f64>>,
+    /// public chance sampling (Supp p. 22, [42]): one board per iteration in CFR passes;
+    /// None = enumerate every card (best-response and expected-value passes always enumerate)
+    sampler: Option<cfr::rng::Rng>,
+    /// this iteration's sampled cards after the root board
+    sampled: Vec<u8>,
     /// normaliser: total weight of card-compatible hand pairs at the root
     pub z: f64,
     pub iterations: u64,
@@ -80,7 +87,7 @@ impl VectorSolver {
                 }
             }
         }
-        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), pool: Vec::new(), z: 1.0, iterations: 0 };
+        let mut s = VectorSolver { g, rules, board: board.to_vec(), ranges, frozen: HashMap::new(), combos, blocks: HashMap::new(), ranks: HashMap::new(), pool: Vec::new(), sampler: None, sampled: Vec::new(), z: 1.0, iterations: 0 };
         let mut c = vec![0f64; COMBOS];
         s.compat_into(&s.ranges[1], 1.0, &mut c);
         s.z = c.iter().zip(&s.ranges[0]).map(|(c, r)| c * r).sum();
@@ -269,11 +276,19 @@ impl VectorSolver {
             Kind::Showdown | Kind::Chance => {
                 // deal the next card: every card not on the board (and not in either hand)
                 let child = if nd.kind == Kind::Chance { Some(self.g.child(node, 0)) } else { None };
-                let w = 1.0 / (52 - board.len() - 4) as f64;
+                // enumeration: each of the U = free − 4 cards outside both hands with weight 1/U;
+                // sampling: the iteration's card, drawn uniformly from the `free` cards off the
+                // board, weighted free/U (unbiased; hands holding it get nothing this iteration)
+                let free = 52 - board.len();
+                let pick = match mode {
+                    Mode::Cfr(_) if self.sampler.is_some() => Some(self.sampled[board.len() - self.board.len()]),
+                    _ => None,
+                };
+                let w = if pick.is_some() { free as f64 } else { 1.0 } / (free - 4) as f64;
                 let mut v = self.take(COMBOS);
                 let mut r2 = [self.take(COMBOS), self.take(COMBOS)];
                 let bm = mask(board);
-                for c in (0..52u8).filter(|&c| bm & (1 << c) == 0) {
+                for c in (0..52u8).filter(|&c| bm & (1 << c) == 0 && pick.is_none_or(|p| p == c)) {
                     r2[0].copy_from_slice(&reach[0]);
                     r2[1].copy_from_slice(&reach[1]);
                     for (h, &(a, b)) in self.combos.iter().enumerate() {
@@ -356,12 +371,31 @@ impl VectorSolver {
         }
     }
 
-    /// Run `iters` more iterations of Linear CFR.
+    /// Sample one board per iteration (Pluribus's search solver, Supp p. 22) instead of
+    /// enumerating chance; `seed` fixes the boards.
+    pub fn with_sampling(mut self, seed: u64) -> Self {
+        self.sampler = Some(cfr::rng::Rng::new(seed));
+        self
+    }
+
+    /// Run `iters` more iterations of Linear CFR (iteration t's regrets and average-strategy
+    /// contributions weighted by t [38]).
     pub fn run(&mut self, iters: u64) {
         let reach = self.ranges.clone();
         for _ in 0..iters {
             self.iterations += 1;
             let t = self.iterations as f64;
+            if let Some(rng) = self.sampler.as_mut() {
+                // one board per iteration, shared by both traversers
+                let bm = mask(&self.board);
+                let mut deck: Vec<u8> = (0..52u8).filter(|&c| bm & (1 << c) == 0).collect();
+                self.sampled.clear();
+                for k in 0..5 - self.board.len() {
+                    let j = k + (rng.next_u64() % (deck.len() - k) as u64) as usize;
+                    deck.swap(k, j);
+                    self.sampled.push(deck[k]);
+                }
+            }
             for i in 0..2 {
                 let mut b = self.board.clone();
                 let v = self.walk(0, &mut b, &reach, i, Mode::Cfr(t));
@@ -546,6 +580,42 @@ mod tests {
         assert_eq!(s.strategy(0, &[], h, true), vec![0.25, 0.75]);
         assert_eq!(s.strategy(0, &[], h, false), vec![0.25, 0.75]);
         let _ = (Action::Call, Next::Terminal);
+    }
+
+    #[test]
+    fn sampled_and_enumerating_solvers_reach_the_same_average() {
+        // a turn subgame with random beliefs: board sampling (one river per iteration) and
+        // enumeration (44 rivers per iteration) at equal work; both averages approach
+        // equilibrium and play alike
+        let rules = Rules { players: 2, ..Rules::default() };
+        let cfg = AbstractionConfig::parse("allin = true
+turn.0 = 1
+turn.1+ = 1
+river.0 = 1
+river.1+ = 1").unwrap();
+        let mut t = [0u32; 6];
+        t[0] = 400;
+        t[1] = 400;
+        let mut rng = Rng::new(21);
+        let board = [2u8, 17, 30, 41];
+        let r: Vec<f64> = (0..COMBOS).map(|_| rng.next_f64()).collect();
+        let r2: Vec<f64> = (0..COMBOS).map(|_| rng.next_f64()).collect();
+        let build = || Subgame::build(&rules, &cfg, round_start(&rules, 2, t, 0));
+        let mut en = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]);
+        let mut sa = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]).with_sampling(7);
+        en.run(100);
+        let t0 = std::time::Instant::now();
+        sa.run(100 * 44);
+        let (ee, es) = (en.exploitability(true), sa.exploitability(true));
+        let start = VectorSolver::new(build(), rules, &board, [r.clone(), r2.clone()]).exploitability(true);
+        // reach-weighted L1 distance between the two average strategies at the root
+        let n = en.g.nodes[0].n as usize;
+        let (a, b) = (en.strategy_all(0, &[], true), sa.strategy_all(0, &[], true));
+        let tot: f64 = r.iter().sum();
+        let d: f64 = (0..COMBOS).map(|h| r[h] * (0..n).map(|k| (a[h * n + k] - b[h * n + k]).abs()).sum::<f64>()).sum::<f64>() / tot / 2.0;
+        eprintln!("uniform {start:.2}, enumerating {ee:.3}, sampling {es:.3} chips (pot 800, sampling {:.1}s); root strategy distance {d:.4}", t0.elapsed().as_secs_f64());
+        assert!(ee < start / 20.0 && es < start / 10.0, "{start} -> {ee} / {es}");
+        assert!(d < 0.05, "average strategies differ: {d}");
     }
 
     #[test]
