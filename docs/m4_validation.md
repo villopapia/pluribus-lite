@@ -234,3 +234,35 @@ iterations: root average strategies differ by 2.3% reach-weighted (max 7.9%); ex
 the average differs by 0.07% of pot on average (max 0.66%), without a consistent direction (mean
 turn 2.38% vs 2.37%, river 0.55% vs 0.47%); game values by 0.015% of pot. The final iteration
 differs more (2.1 points of pot on average): it is a single noisy iterate either way.
+
+### Follow-up 2 (2026-11-09): iteration sweep, final iteration vs average
+
+`iter_sweep` on distinct subgames captured from the 800-hand run (`data/subgames_s1.txt`: 360
+distinct turn, 237 distinct river): 200 river subgames at 400 / 1,600 / 6,400 / 25,600 iterations
+and the first 51 turn subgames at 150 / 600 / 2,400 (the remaining 49 turn subgames and the
+9,600 level were not run: ~1.4 h and ~3 h more). Exploitability within the subgame against the
+captured beliefs, as % of the pot at the subgame root (mean, median in brackets); solve time per
+search on one core with 12 searches running concurrently (≈ core-seconds; contention inflates it
+≈ 2× over an idle machine). Output: `data/iter_sweep.tsv`.
+
+| street | iterations | final iteration, % pot | average, % pot | final / average | core-s per search (mean, max) |
+|---|---:|---:|---:|---:|---:|
+| turn | 150 | 21.7 (21.0) | 2.05 (2.22) | 10 | 71, 117 |
+| turn | 600 | 11.0 (9.8) | 0.32 (0.29) | 41 | 281, 454 |
+| turn | 2,400 | 11.4 (10.1) | 0.05 (0.03) | 294 | 1,088, 1,790 |
+| river | 400 | 16.2 (14.3) | 0.63 (0.45) | 28 | 4.3, 8.5 |
+| river | 1,600 | 7.8 (6.0) | 0.18 (0.12) | 59 | 17, 34 |
+| river | 6,400 | 6.0 (4.8) | 0.04 (0.02) | 202 | 69, 135 |
+| river | 25,600 | 5.9 (4.9) | 0.02 (0.01) | 391 | 274, 539 |
+
+**The final iteration does not converge towards the average.** It improves up to ~600 (turn) /
+~6,400 (river) iterations and then plateaus at **~11% (turn) and ~6% (river) of the pot**, while
+the average keeps converging (0.05% and 0.02%). This is the known behaviour of regret matching:
+its average converges, its last iterate need not. The 400-iteration river figure (16.2%)
+matches the match's own measurement (16.4%).
+
+**Compute vs Pluribus** (28 cores × 1–33 s ≈ 28–924 core-s per search, Main p. 888): our turn
+search at 150 / 600 / 2,400 iterations takes 71 / 281 / 1,088 core-s; river 400 / 6,400 / 25,600
+takes 4 / 69 / 274. The final-iteration plateau is reached inside Pluribus's per-search budget on
+both streets. (Not like for like: Pluribus samples one board per iteration, D-SRCH-12, and its
+subgames have other sizes.)
