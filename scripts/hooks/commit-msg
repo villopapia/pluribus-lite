@@ -1,0 +1,9 @@
+#!/bin/sh
+# Strip AI attribution trailers from commit messages (CLAUDE.md, "No AI attribution").
+# Install once per clone: git config core.hooksPath scripts/hooks
+# Test: sh scripts/hooks/test_commit_msg.sh
+sed -i -e '/^Co-Authored-By:.*noreply@anthropic\.com/Id' \
+       -e '/^Claude-Session:/d' \
+       -e '/Generated with \[\?Claude Code\]\?/d' "$1"
+# drop trailing blank lines left behind
+sed -i -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' "$1"

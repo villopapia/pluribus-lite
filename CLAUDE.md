@@ -38,6 +38,7 @@ original's strength is not a goal.
   `--stop-file` and checkpoint on request. See `scripts/slurm_train.sh` (96 h jobs chained by
   checkpoint).
 - Long local jobs run at below-normal priority and never longer than 2 hours unattended.
+- **No AI attribution.** Never add Co-Authored-By, "Generated with Claude Code" or session-link trailers to commits or PRs (enforced by `scripts/hooks/commit-msg`; install with `git config core.hooksPath scripts/hooks`).
 
 ## Session handoff
 **Read `docs/HANDOFF.md` first**: running processes, recent decisions, open tasks, and
