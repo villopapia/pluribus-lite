@@ -193,10 +193,11 @@ struct Logger {
 
 impl Logger {
     /// Append one line, opening and closing the file each time (one row per --log-seconds),
-    /// like progress.tsv. A handle held for the whole run keeps writing to the original file
-    /// if anything renames, moves or replaces metrics.tsv meanwhile (Rust opens with
-    /// delete-sharing), so the visible metrics.tsv can freeze while training continues (the
-    /// Dell, 2026-11-09).
+    /// like progress.tsv. With a handle held for the whole run, a `dir` listing on the Dell
+    /// showed metrics.tsv's modified time frozen at the last close (07:10, a watchdog pause)
+    /// while rows were still being appended (2026-11-09; no data gap). Closing the file per
+    /// row keeps listings current and also keeps writing to the visible file if anything
+    /// renames or replaces it (Rust opens with delete-sharing).
     fn append(&self, line: &str) {
         append_line(&self.path, line);
     }
