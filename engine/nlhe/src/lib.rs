@@ -14,6 +14,7 @@ pub mod estimate;
 pub mod eval;
 pub mod eval_lut;
 pub mod hu_agent;
+pub mod msolve;
 pub mod index;
 pub mod kmeans;
 pub mod ochs;
