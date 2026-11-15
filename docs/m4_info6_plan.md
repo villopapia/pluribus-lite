@@ -107,7 +107,7 @@ blocked entries u16::MAX) → 5.7 GB. Per-flop within-cluster values are logged 
 - Canonical flops: approved 2026-11-08. Step 1 done (§3).
 - Turn 5 restarts sits at the noise floor (expected +1.5%): accept only if the build must run on
   the MSI (~37 h instead of ~170 h); on HPC keep 25 restarts (~32 h on one 64-core node).
-- **Recommendation (2026-11-15)**: accept river 5 restarts + 200k sample, turn Hamerly, and turn 5
+- **Decided by the user 2026-11-15**: Hamerly accepted; turn 5 restarts approved for laptop builds only (HPC: `--turn-restarts 25`); 10k turn sample and truncated means rejected. The recommendation was: accept river 5 restarts + 200k sample, turn Hamerly, and turn 5
   restarts for the MSI build (measured +0.00%, ARI 1.000 on the benchmark flop; expected loss at the
   floor; ×4.8, ~50 h instead of ~4 × that); reject turn 10k sample and mean truncation. Rebuild with
   `--turn-restarts 25` on HPC if one becomes available (same files, same format).
