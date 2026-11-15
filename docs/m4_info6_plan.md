@@ -78,6 +78,12 @@ Memory: < 1 GB per worker. Search-time cost: load one 2.65 MB table per flop (~m
 on demand (~1–6 min) is far too slow for search (Pluribus 1–33 s per search, Main p. 888), so the
 tables are precomputed.
 
+**Builder measured (2026-11-15)**, `build_search_abstraction` with the recommended set (river 5
+restarts on a 200k sample, turn Hamerly + 5 restarts), 12 threads, BelowNormal: flop [0, 1, 2]
+59.3 s, flop [0, 1, 4] 106.9 s (incl. features, histograms and quality measures). ≈ 100 s per
+typical flop → **1,755 flops ≈ 50 h ≈ 5 nights** of ~10 h. 3.25 MB per flop (dense u16 tables,
+blocked entries u16::MAX) → 5.7 GB. Per-flop within-cluster values are logged in `build.tsv`.
+
 ## 4. Build plan (when approved)
 
 1. **(done, §3)** **Benchmark one flop** end to end at faithful and reduced settings; replace §3's estimates with
@@ -88,7 +94,7 @@ tables are precomputed.
    properties (symmetry, triangle inequality on samples).
 3. **Canonical flops**: 1,755 classes, suit-permutation maps; tests: every raw flop maps to one
    class, bucket lookups invariant under suit permutation.
-4. **`build_search_abstraction`** (pure Rust, `PathBuf`, `--threads`, `--seed`, `--stop-file`,
+4. **(built 2026-11-15)** **`build_search_abstraction`** (pure Rust, `PathBuf`, `--threads`, `--seed`, `--stop-file`,
    one file per flop with header + checksum, skips finished flops = resumable), written to
    `data/search_abstraction/`. Logged parameters per file.
 5. **Integration**: the NLHE search's later-round buckets read the current flop's table; until
@@ -101,3 +107,7 @@ tables are precomputed.
 - Canonical flops: approved 2026-11-08. Step 1 done (§3).
 - Turn 5 restarts sits at the noise floor (expected +1.5%): accept only if the build must run on
   the MSI (~37 h instead of ~170 h); on HPC keep 25 restarts (~32 h on one 64-core node).
+- **Recommendation (2026-11-15)**: accept river 5 restarts + 200k sample, turn Hamerly, and turn 5
+  restarts for the MSI build (measured +0.00%, ARI 1.000 on the benchmark flop; expected loss at the
+  floor; ×4.8, ~50 h instead of ~4 × that); reject turn 10k sample and mean truncation. Rebuild with
+  `--turn-restarts 25` on HPC if one becomes available (same files, same format).

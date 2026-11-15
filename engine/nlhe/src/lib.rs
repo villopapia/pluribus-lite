@@ -20,5 +20,6 @@ pub mod kmeans;
 pub mod ochs;
 pub mod potential;
 pub mod river_table;
+pub mod search_abs;
 pub mod subgame;
 pub mod vsolve;
