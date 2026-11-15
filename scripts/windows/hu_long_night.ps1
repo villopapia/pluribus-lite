@@ -24,6 +24,8 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $dir  = Join-Path $repo 'data\hu_long'
 if ($OutputDir) { $dir = [IO.Path]::GetFullPath($OutputDir) }
+New-Item -ItemType Directory -Force $dir | Out-Null
+$log  = Join-Path $dir 'night.log'
 $mutex = New-Object Threading.Mutex($false, 'Local\pluribus-lite-hu-night')
 $locked = $false
 $awake = $false
@@ -36,8 +38,6 @@ if ($KeepAwake) {
     if ([HuNightPower]::SetThreadExecutionState(2147483649) -eq 0) { throw 'Could not prevent idle sleep' }
     $awake = $true
 }
-New-Item -ItemType Directory -Force $dir | Out-Null
-$log  = Join-Path $dir 'night.log'
 (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
 $end = [datetime]::Today.Add([timespan]::Parse($Until))
 if ($end -le (Get-Date)) { $end = $end.AddDays(1) }
@@ -56,15 +56,26 @@ while ($true) {
     if ($max -lt 600) { break }
     $arm = $arms[$i % 2]
     Add-Content $log "$(Get-Date -Format s) chunk $($i + 1): arm $arm, --max-secs $max"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'hu_long.ps1') -Arm $arm -MaxSecs $max `
+    # Capture the chunk's output (incl. its error message) so a failure is explained in night.log.
+    $ErrorActionPreference = 'Continue'
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'hu_long.ps1') -Arm $arm -MaxSecs $max `
         -TurnIters $TurnIters -RiverIters $RiverIters -BoardsPerIter $BoardsPerIter -Deals $Deals `
         -Seed $Seed -Threads $Threads -OutputDir $dir -StopAt $end.ToString('o') `
-        -MinAvailableGiB $MinAvailableGiB -AbortAvailableGiB $AbortAvailableGiB
-    Add-Content $log "$(Get-Date -Format s) chunk $($i + 1) done (exit $LASTEXITCODE)"
-    if ($LASTEXITCODE -ne 0) { throw 'Chunk failed; no further arms will start' }
+        -MinAvailableGiB $MinAvailableGiB -AbortAvailableGiB $AbortAvailableGiB 2>&1 | ForEach-Object { "$_" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    $out | Write-Output
+    Add-Content $log "$(Get-Date -Format s) chunk $($i + 1) done (exit $code)"
+    if ($code -ne 0) {
+        $out | Where-Object { $_.Trim() } | ForEach-Object { Add-Content $log "    $_" }
+        throw 'Chunk failed; no further arms will start'
+    }
     $i++
 }
 Add-Content $log "=== $(Get-Date -Format s) night end after $i chunks"
+} catch {
+    Add-Content $log "=== $(Get-Date -Format s) night stopped: $_"
+    throw
 } finally {
     if ($awake) { [HuNightPower]::SetThreadExecutionState(2147483648) | Out-Null }
     if ($locked) { $mutex.ReleaseMutex() }

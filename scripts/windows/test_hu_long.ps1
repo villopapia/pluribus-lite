@@ -81,6 +81,7 @@ try {
     $ErrorActionPreference = 'Continue'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'hu_long_night.ps1') -OutputDir (Join-Path $fixture 'duplicate-night') 2>&1 | Out-File (Join-Path $fixture 'commands.log') -Append
     Assert ($LASTEXITCODE -ne 0) 'Duplicate night driver was accepted'
+    Assert ((Get-Content (Join-Path $fixture 'duplicate-night/night.log') -Raw) -match 'night stopped: Another overnight evaluation owns the lock') 'Refused night was not logged'
     $ErrorActionPreference = 'Stop'
 } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
 try {
@@ -90,6 +91,7 @@ try {
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'hu_long_night.ps1') -Until $until -OutputDir $failedNight 2>&1 | Out-File (Join-Path $fixture 'commands.log') -Append
     Assert ($LASTEXITCODE -ne 0) 'Night driver hid a failed chunk'
     Assert (-not ((Get-Content (Join-Path $failedNight 'night.log') -Raw) -match 'chunk 2:')) 'Night driver continued after a failure'
+    Assert ((Get-Content (Join-Path $failedNight 'night.log') -Raw) -match 'hu_match failed with exit code 7') 'Chunk error message missing from night.log'
 } finally {
     Remove-Item Env:HU_LAUNCHER_TEST_MODE -ErrorAction SilentlyContinue
     $ErrorActionPreference = 'Stop'
