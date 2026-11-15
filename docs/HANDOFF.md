@@ -47,9 +47,11 @@ Overnight: `scripts\windows\hu_long_night.ps1 -Until 08:00` (alternates the arms
 2026-11-13 and verified against `final.log` / `average.log` (seed 2, 3,400 deals,
 25,600 / 6,400, k = 1, 12 threads). Nothing is running and no task is scheduled.
 
-**D-INFO-6 per-flop build (MSI, not started):** `scripts\windows\info6_night.ps1 -Until 08:00`
-(resumable, BelowNormal, ≤ 2 h chunks, stops by 08:00; output `data\search_abstraction\`,
-log `night.log`, per-flop `build.tsv`). ~60–110 s per flop, 1,755 flops ≈ 50 h ≈ 5 nights.
+**D-INFO-6 per-flop build (MSI + Dell, sharded; not started):** MSI shard 0/2 nightly
+(`scripts\windows\info6_night.ps1 -Shard 0/2 -Until 08:00`), Dell shard 1/2 continuous once its
+training run is finished and backed up. Exact steps, the cross-machine check (3 flops, hashes in
+`docs/info6_check_hashes.txt`) and the merge are in `docs/m4_info6_plan.md` §6. ~50–110 s per flop
+on the MSI; output `data\search_abstraction\` (log `night.log`, per-flop `build.tsv`).
 
 **Dell pilot, metrics.tsv "frozen" at 07:10 (2026-11-09): no data gap.** A `dir` listing showed
 the modified time of the last close (the 07:10 watchdog pause) while the resumed trainer kept

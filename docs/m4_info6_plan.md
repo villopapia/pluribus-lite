@@ -111,3 +111,78 @@ blocked entries u16::MAX) → 5.7 GB. Per-flop within-cluster values are logged 
   restarts for the MSI build (measured +0.00%, ARI 1.000 on the benchmark flop; expected loss at the
   floor; ×4.8, ~50 h instead of ~4 × that); reject turn 10k sample and mean truncation. Rebuild with
   `--turn-restarts 25` on HPC if one becomes available (same files, same format).
+
+## 6. Two-machine build (MSI + Dell, 2026-11-15)
+
+`build_search_abstraction --shard i/n` builds the flops whose canonical index c has c % n == i
+(shard 0/2: 878 flops, 1/2: 877). A flop's seed depends only on c, so a flop's file is the same
+whichever machine builds it. `scripts\windows\info6_night.ps1 -Shard i/n` passes it on;
+`-Continuous` drops the 08:00 cutoff (still ≤ 2 h chunks, back to back, BelowNormal) and stops
+when the shard is complete or `STOP` exists. **Both machines use `--threads 12`** (the default):
+the k-means reductions are parallel, so the file is only guaranteed to repeat with the same
+thread count.
+
+**Cross-machine check.** The first 3 canonical flops built on the MSI (`--limit 3`, no shard) are
+in `docs/info6_check_hashes.txt`. Two independent MSI builds of these flops were byte-identical.
+The Dell must reproduce all three before it builds a shard; on any mismatch, stop and investigate
+(compiler, CPU, threads) before sharding.
+
+`scripts/fetch_verified.sh HOST REMOTE_DIR LOCAL_DIR PATTERN...` copies files from the Dell with
+scp and checks them against SHA-256 hashes computed on the Dell (read-only there). It was tested
+over Tailscale on `schedule.txt`.
+
+### Dell steps (after its training run has finished, ~15:35 on 2026-11-15)
+
+1. **Check that the run is finished** (MSI, Git Bash, repo root):
+   `ssh user@desktop-g1k8ugg "powershell -NoProfile -Command \"Get-Content C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\launcher.log -Tail 5; Get-Process train_blueprint -ErrorAction SilentlyContinue\""`
+   The last line must be an exit with code 0, and no `train_blueprint` process may be listed.
+2. **Back up the blueprint to the MSI and verify it** (MSI, Git Bash, repo root; ~7.5 GB):
+   ```bash
+   R=C:/Users/User/pluribus-lite/data/runs/pilot_fit11_long
+   CK=$(ssh user@desktop-g1k8ugg "powershell -NoProfile -Command \"(Get-ChildItem C:\Users\User\pluribus-lite\data\runs\pilot_fit11_long\ckpt_*.bin | Sort-Object Name | Select-Object -Last 1).Name\"" | tr -d '\r')
+   echo "$CK"
+   bash scripts/fetch_verified.sh user@desktop-g1k8ugg $R data/runs/pilot_fit11_long_final "$CK" postflop_snapshots.bin schedule.txt '*.log' '*.tsv' train.err
+   ```
+   Go on only after it prints `OK: N files verified`. The remote hashes stay in
+   `data/runs/pilot_fit11_long_final/remote.sha256`.
+3. **Stop the resume task from restarting the trainer at logon** (Dell, PowerShell; changes a
+   scheduled task, so only with your OK): `Disable-ScheduledTask -TaskName 'pluribus-lite resume pilot'`
+4. **Update and build** (Dell, PowerShell):
+   ```powershell
+   cd C:\Users\User\pluribus-lite
+   git status --short          # data/ is gitignored; any tracked change listed here is discarded next
+   git fetch origin
+   git reset --hard origin/main
+   $env:PATH = "$HOME\.cargo\bin;$env:PATH"
+   cd engine; cargo build --release --bin build_search_abstraction; cd ..
+   ```
+5. **Cross-check** (Dell, PowerShell, ~5 min):
+   ```powershell
+   .\engine\target\release\build_search_abstraction.exe --out data\search_abstraction_check --limit 3 --threads 12
+   Get-Content docs\info6_check_hashes.txt | ForEach-Object { $h, $n = $_ -split ' \*'; if ((Get-FileHash "data\search_abstraction_check\$n").Hash -eq $h) { "ok $n" } else { "MISMATCH $n" } }
+   ```
+   All three must print `ok`. Otherwise stop and investigate, and start neither shard.
+6. **Start the Dell's shard** (Dell, PowerShell; detached, BelowNormal, runs until done or STOP):
+   ```powershell
+   Start-Process powershell -WindowStyle Minimized -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\Users\User\pluribus-lite\scripts\windows\info6_night.ps1','-Continuous','-Shard','1/2','-UpdateBinary'
+   ```
+   Progress: `data\search_abstraction\night.log` and `build.tsv`. Stop:
+   `New-Item C:\Users\User\pluribus-lite\data\search_abstraction\STOP`.
+
+### MSI shard (each night, after the Dell check passed)
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\info6_night.ps1 -Shard 0/2 -Until 08:00 -UpdateBinary`
+(drop `-UpdateBinary` on later nights; it only copies the current build into
+`data\search_abstraction\bin`).
+
+### Merge (MSI, Git Bash, repo root; can be repeated, also while the Dell is still building)
+
+```bash
+bash scripts/fetch_verified.sh user@desktop-g1k8ugg C:/Users/User/pluribus-lite/data/search_abstraction data/search_abstraction_dell 'flop_*.bin'
+mv -n data/search_abstraction_dell/flop_*.bin data/search_abstraction/
+engine/target/release/build_search_abstraction --out data/search_abstraction --limit 0
+```
+`flop_*.bin` never matches an unfinished flop (those are `.tmp`). The last command checks every
+file's checksum and prints `shard 0/1: 1755 flops, N done`, followed by `shard complete` once all
+1,755 are there. Each machine's `build.tsv` stays in its own directory. Copy the Dell's into the
+MSI's as `build_dell.tsv` if wanted.

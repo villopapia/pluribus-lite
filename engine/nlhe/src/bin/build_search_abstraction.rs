@@ -3,7 +3,7 @@
 //!
 //! `build_search_abstraction --out ../data/search_abstraction [--threads 12] [--seed 1] [--k 500]
 //!   [--river-restarts 5] [--river-sample 200000] [--turn-restarts 5] [--max-secs N]
-//!   [--stop-file PATH] [--limit N]`
+//!   [--stop-file PATH] [--limit N] [--shard i/n]`
 //!
 //! Per flop, as `info6_bench` with the accepted reductions: river OCHS k-means (L2) fitted on a
 //! sample, all points assigned; turn histograms over the river buckets, EMD k-means with Hamerly
@@ -11,6 +11,9 @@
 //! exists and checks are skipped. No new flop starts after `--max-secs` or once the stop file
 //! exists; a flop in progress finishes (~1–2 min) unless the process is killed, which is safe
 //! (files are written to .tmp and renamed). One line per flop is appended to `build.tsv`.
+//! `--shard i/n` builds only the flops whose canonical index c has c % n == i, so n machines
+//! split the work; a flop's seed depends only on c, so its file is the same on any shard. The
+//! last line is "shard complete" once every flop of the shard has a valid file.
 
 use nlhe::abstraction::{river_features, FeatureScratch};
 use nlhe::equity::{combo_cards, combo_index, COMBOS};
@@ -36,20 +39,25 @@ fn main() {
     let max_secs = num("--max-secs", u64::MAX);
     let limit = num("--limit", u64::MAX) as usize;
     let stop = get("--stop-file").map(PathBuf::from);
+    let (shard, shards) = get("--shard").map_or((0, 1), |v| {
+        let (i, n) = v.split_once('/').expect("--shard i/n");
+        (i.parse::<usize>().expect("shard i"), n.parse::<usize>().expect("shard n"))
+    });
+    assert!(shard < shards, "--shard i/n needs i < n");
     std::fs::create_dir_all(&out).expect("create --out");
     let t_all = Instant::now();
-    let flops = search_abs::canonical_flops();
-    let done = flops.iter().filter(|f| search_abs::read(&out.join(search_abs::file_name(**f))).is_ok()).count();
+    let mine: Vec<(usize, [u8; 3])> = search_abs::canonical_flops().into_iter().enumerate().filter(|(ci, _)| ci % shards == shard).collect();
+    let done = mine.iter().filter(|(_, f)| search_abs::read(&out.join(search_abs::file_name(*f))).is_ok()).count();
     println!(
-        "{} canonical flops, {done} done; k {k}, seed {seed}, river {rr} restarts on {rs} points, turn {tr} restarts (Hamerly), threads {threads}",
-        flops.len()
+        "shard {shard}/{shards}: {} flops, {done} done; k {k}, seed {seed}, river {rr} restarts on {rs} points, turn {tr} restarts (Hamerly), threads {threads}",
+        mine.len()
     );
     let log_path = out.join("build.tsv");
     if !log_path.exists() {
         std::fs::write(&log_path, "flop\tsecs\triver_within_sq_l2\tturn_within_emd\tseed\tk\triver_restarts\triver_sample\tturn_restarts\n").unwrap();
     }
     let mut built = 0;
-    for (ci, &flop) in flops.iter().enumerate() {
+    for &(ci, flop) in &mine {
         if built >= limit || t_all.elapsed().as_secs() >= max_secs || stop.as_ref().is_some_and(|s| s.exists()) {
             break;
         }
@@ -64,9 +72,12 @@ fn main() {
         let mut log = std::fs::OpenOptions::new().append(true).open(&log_path).unwrap();
         writeln!(log, "{:?}\t{secs:.1}\t{sse:.6}\t{wemd:.5}\t{fseed}\t{k}\t{rr}\t{rs}\t{tr}", flop).unwrap();
         built += 1;
-        println!("flop {ci} {flop:?}: {secs:.1}s ({} of {} done)", done + built, flops.len());
+        println!("flop {ci} {flop:?}: {secs:.1}s ({} of {} done)", done + built, mine.len());
     }
     println!("stopped after {built} flops, {:.0}s", t_all.elapsed().as_secs_f64());
+    if done + built == mine.len() {
+        println!("shard complete");
+    }
 }
 
 fn build(flop: [u8; 3], k: usize, seed: u64, rr: usize, rs: usize, tr: usize, threads: usize) -> (Table, f64, f64) {
