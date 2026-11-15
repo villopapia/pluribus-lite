@@ -1,4 +1,4 @@
-# Handoff (updated 2026-11-09 ~06:45)
+# Handoff (updated 2026-11-15)
 
 Read this first. Then read `CLAUDE.md` (rules), `docs/fidelity_spec.md` (published
 parameters), `docs/deviations.md` (every difference) and `docs/fidelity_report.md` (latest
@@ -38,9 +38,18 @@ deals each. One ≤ 2 h chunk per call, resumable, BelowNormal:
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\hu_long.ps1 -Arm final`
 (or `-Arm average`). Output `data\hu_long\{final,average}.{tsv,log}`; paired report:
 `analysis\.venv\Scripts\python analysis\hu_pair.py data\hu_long\final.tsv data\hu_long\average.tsv`.
-~28–34 s per deal at 12 threads (≈ 29 h per arm). Pre-flight chunks done: 70 / 65 deals.
+~28–34 s per deal at 12 threads (≈ 29 h per arm).
 Overnight: `scripts\windows\hu_long_night.ps1 -Until 08:00` (alternates the arms; log
-`data\hu_long\night.log`); first night started 2026-11-09 21:56.
+`data\hu_long\night.log`, which since 2026-11-15 includes a failed or refused chunk's error).
+**Paused 2026-11-15 (resumable) at 879 final / 808 average deals**; interim result in
+`docs/m4_validation.md` (long run, interim) and F-SRCH-2: paired final − average −36.9
+[−229, +155] mbb/hand, no detectable difference. `data\hu_long\settings.json` was backfilled
+2026-11-13 and verified against `final.log` / `average.log` (seed 2, 3,400 deals,
+25,600 / 6,400, k = 1, 12 threads). Nothing is running and no task is scheduled.
+
+**D-INFO-6 per-flop build (MSI, not started):** `scripts\windows\info6_night.ps1 -Until 08:00`
+(resumable, BelowNormal, ≤ 2 h chunks, stops by 08:00; output `data\search_abstraction\`,
+log `night.log`, per-flop `build.tsv`). ~60–110 s per flop, 1,755 flops ≈ 50 h ≈ 5 nights.
 
 **Dell pilot, metrics.tsv "frozen" at 07:10 (2026-11-09): no data gap.** A `dir` listing showed
 the modified time of the last close (the 07:10 watchdog pause) while the resumed trainer kept

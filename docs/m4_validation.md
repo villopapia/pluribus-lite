@@ -318,3 +318,23 @@ k regret updates (k = 1 is the previous solver, bit for bit; unit test at k = 4:
 **k does not change the final iteration's plateau** (23–25% of the pot at ~250–320 core-s);
 at equal compute the average converges fastest with k = 1 (more Linear CFR iterations). The
 long run keeps k = 1, turn 25,600 / river 6,400 (and the pre-flight deals).
+
+### Long run, interim (paused 2026-11-15 at 808 paired deals)
+
+Setup as follow-up 4: seed 2, 3,400 deals per arm planned, turn 25,600 / river 6,400 sampled
+iterations, k = 1, 12 threads; final-iteration play (faithful) vs `--play-average`, both arms on
+the same deals. `analysis/hu_pair.py data/hu_long/final.tsv data/hu_long/average.tsv`, full
+AIVAT, mbb/hand, 95% CI:
+
+| | deals | mean | s.e. | 95% CI |
+|---|---:|---:|---:|---|
+| final vs blueprint | 879 | +232.5 | 209.8 | [−179, +644] |
+| average vs blueprint | 808 | +249.5 | 211.7 | [−165, +664] |
+| **paired final − average** | 808 common | **−36.9** | 98.1 | **[−229, +155]** (arm correlation 0.90) |
+
+**No detectable difference between final-iteration and average play at ±~190 mbb/hand**, and
+neither arm is significantly ahead of the blueprint yet. Despite the final iteration's much
+higher subgame exploitability (F-SRCH-1), the blueprint does not exploit it measurably.
+Paused (resumable): the run continues by re-running `scripts\windows\hu_long_night.ps1`; it
+skips completed deals. `data\hu_long\settings.json` was backfilled on 2026-11-13 and checked
+against `final.log` / `average.log` (seed 2, 3,400 deals, 25,600 / 6,400, k = 1, 12 threads).
